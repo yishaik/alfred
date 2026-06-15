@@ -1,0 +1,16 @@
+# Secrets — never commit
+.env
+
+# Runtime state / logs
+bridge.log
+bridge.log.old
+restart.log
+run.log
+aq.jsonl
+session_id.txt
+state/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/

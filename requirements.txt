@@ -1,0 +1,4 @@
+python-telegram-bot>=22.0
+claude-agent-sdk>=0.2.90
+httpx>=0.27
+# optional: keyring (store the bot token in Windows Credential Manager)
