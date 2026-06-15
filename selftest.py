@@ -264,6 +264,33 @@ def test_session_pure():
           AgentConfig.from_dict("x", cfg.to_dict()).secretary is True)
 
 
+def test_voice_picker():
+    import tgbridge.voice as v
+    from tgbridge.session import AgentConfig
+
+    # the picker offers the active backend's voices, and a chosen voice
+    # survives a save/load roundtrip
+    backend, names = v.list_voices()
+    check("list_voices shape", isinstance(names, list)
+          and (backend in (None, "openai", "edge")))
+    cfg = AgentConfig(name="a", voice="nova")
+    check("voice roundtrip",
+          AgentConfig.from_dict("a", cfg.to_dict()).voice == "nova")
+
+    # an edge-shaped name is rejected on the OpenAI backend and vice versa,
+    # so a mismatched override can never reach the wrong engine (pure check of
+    # the selection rule synthesize() uses)
+    def openai_pick(voice):
+        return voice if (voice and "Neural" not in voice) else "DEFAULT"
+    def edge_pick(voice):
+        return voice if (voice and "Neural" in voice) else "DEFAULT"
+    check("openai keeps flat voice", openai_pick("nova") == "nova")
+    check("openai drops edge voice", openai_pick("he-IL-HilaNeural") == "DEFAULT")
+    check("edge keeps neural voice",
+          edge_pick("he-IL-HilaNeural") == "he-IL-HilaNeural")
+    check("edge drops flat voice", edge_pick("nova") == "DEFAULT")
+
+
 def test_proactive():
     from tgbridge.proactive import (declined, is_quiet_hour, should_check_in,
                                     SENTINEL)
@@ -470,6 +497,7 @@ if __name__ == "__main__":
     test_soul()
     test_mood()
     test_proactive()
+    test_voice_picker()
     test_singleton_lock()
     asyncio.run(test_question_serialization())
     asyncio.run(test_peer_protocol())

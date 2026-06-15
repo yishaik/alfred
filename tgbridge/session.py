@@ -135,6 +135,7 @@ class AgentConfig:
     secretary: bool = False
     auto_approve: bool = True
     tts: bool = False
+    voice: str = ""             # TTS voice override ("" = backend default)
     proactive: bool = False
     always_allow: list = field(default_factory=list)
 
@@ -142,7 +143,7 @@ class AgentConfig:
         return {"workdir": self.workdir, "model": self.model,
                 "soul": self.soul.to_dict(), "secretary": self.secretary,
                 "auto_approve": self.auto_approve, "tts": self.tts,
-                "proactive": self.proactive,
+                "voice": self.voice, "proactive": self.proactive,
                 "always_allow": sorted(self.always_allow)}
 
     @classmethod
@@ -157,7 +158,7 @@ class AgentConfig:
                    model=d.get("model", MODEL), soul=soul,
                    secretary=bool(d.get("secretary")),
                    auto_approve=bool(d.get("auto_approve", True)),
-                   tts=bool(d.get("tts")),
+                   tts=bool(d.get("tts")), voice=d.get("voice", ""),
                    proactive=bool(d.get("proactive")),
                    always_allow=list(d.get("always_allow", [])))
 
@@ -702,7 +703,7 @@ class AgentSession:
 
     async def _speak(self, text: str):
         try:
-            res = await voice.synthesize(text)
+            res = await voice.synthesize(text, self.cfg.voice)
             if res:
                 self.outbox.voice(res[0], res[1])
             else:
