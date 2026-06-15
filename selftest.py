@@ -38,7 +38,12 @@ def test_fmt():
           md_to_html("a * b * c") == "a * b * c", md_to_html("a * b * c"))
     bq = md_to_html("> line one\n> line two")
     check("md_to_html blockquote",
-          bq == "<blockquote>line one\nline two</blockquote>\n", bq)
+          bq == "<blockquote>line one\nline two</blockquote>", bq)
+    # mid-message quote keeps a separator before following text
+    bq2 = md_to_html("> q\n\ntail")
+    check("md_to_html blockquote midflow",
+          bq2.startswith("<blockquote>q</blockquote>\n") and bq2.endswith("tail"),
+          bq2)
     nested = md_to_html("**bold _it_ x**")
     check("md_to_html nested", nested == "<b>bold <i>it</i> x</b>", nested)
     parts = split_msg("a" * 9000)
@@ -259,6 +264,28 @@ def test_session_pure():
           AgentConfig.from_dict("x", cfg.to_dict()).secretary is True)
 
 
+def test_soul():
+    from tgbridge.session import AgentConfig
+    from tgbridge.soul import Soul, PRESETS
+
+    # legacy free-text persona migrates into soul.notes
+    legacy = AgentConfig.from_dict("x", {"persona": "be terse"})
+    check("legacy persona -> soul.notes", legacy.soul.notes == "be terse")
+
+    # structured soul survives a save/load roundtrip
+    cfg = AgentConfig(name="a", soul=PRESETS["alfred"])
+    back = AgentConfig.from_dict("a", cfg.to_dict())
+    check("soul roundtrip name", back.soul.display_name == "Alfred")
+    check("soul roundtrip lists", back.soul.values == PRESETS["alfred"].values)
+
+    # an unset soul renders nothing; a set one renders a character block
+    check("empty soul renders nothing", Soul().render_prompt() == "")
+    check("alfred soul renders block",
+          "Alfred" in PRESETS["alfred"].render_prompt())
+    check("mood layers onto soul",
+          "grumpy" in PRESETS["alfred"].render_prompt(mood="grumpy"))
+
+
 async def test_question_serialization():
     """Two concurrent AskUserQuestions must be shown one at a time, each
     waiting for its answer (no timeout, no answering for the user)."""
@@ -370,6 +397,7 @@ if __name__ == "__main__":
     test_ratelimit()
     test_imports()
     test_session_pure()
+    test_soul()
     test_singleton_lock()
     asyncio.run(test_question_serialization())
     asyncio.run(test_peer_protocol())
