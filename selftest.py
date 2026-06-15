@@ -264,6 +264,41 @@ def test_session_pure():
           AgentConfig.from_dict("x", cfg.to_dict()).secretary is True)
 
 
+def test_mood():
+    from tgbridge.mood import Mood, ERROR_STREAK, WIN_STREAK, LONG_TURNS
+
+    m = Mood()
+    check("fresh mood is neutral", m.describe() == "" and "fresh" in m.label())
+    check("neutral nudge is empty", m.pop_nudge() == "")
+
+    # an error streak turns the weather cautious, and the nudge fires once
+    for _ in range(ERROR_STREAK):
+        m.note_result(is_error=True)
+    check("error streak -> cautious", "cautious" in m.label())
+    n = m.pop_nudge()
+    check("cautious nudge non-empty", bool(n))
+    check("nudge fires once per shift", m.pop_nudge() == "")
+
+    # a clean turn recovers; enough wins reach "in the zone"
+    w = Mood()
+    for _ in range(WIN_STREAK):
+        w.note_result(is_error=False)
+    check("win streak -> in the zone", "zone" in w.label())
+
+    # a long session is weary regardless of wins
+    long = Mood()
+    for _ in range(LONG_TURNS):
+        long.note_result(is_error=False)
+    check("long session -> weary", "weary" in long.label())
+
+    # a crash leaves the next turn recovering
+    c = Mood()
+    c.note_restart(crashed=True)
+    check("crash -> recovering", "recovering" in c.label() and bool(c.pop_nudge()))
+    c.note_result(is_error=False)
+    check("clean turn clears recovery", "recovering" not in c.label())
+
+
 def test_soul():
     from tgbridge.session import AgentConfig
     from tgbridge.soul import Soul, PRESETS
@@ -398,6 +433,7 @@ if __name__ == "__main__":
     test_imports()
     test_session_pure()
     test_soul()
+    test_mood()
     test_singleton_lock()
     asyncio.run(test_question_serialization())
     asyncio.run(test_peer_protocol())
