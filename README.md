@@ -1,4 +1,4 @@
-# Robin — Telegram ↔ Claude Code bridge (v2 — Agent SDK)
+# Alfred — Telegram ↔ Claude Code bridge (v2 — Agent SDK)
 
 Drives always-on `claude` sessions from a Telegram bot locked to your chat.
 v2 replaces the raw `claude -p` subprocess with the official **Claude Agent SDK**
