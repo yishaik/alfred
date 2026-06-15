@@ -50,6 +50,15 @@ async def _whisper(url: str, key: str, model: str, path: str) -> str | None:
 # --------------------------------------------------------------------------- #
 # TTS
 # --------------------------------------------------------------------------- #
+# Selectable voices per backend (for the /voice picker). OpenAI names are flat;
+# edge names carry locale + "Neural" so we can tell the two apart at synth time.
+OPENAI_VOICES = ["alloy", "ash", "coral", "echo", "fable", "nova", "onyx",
+                 "sage", "shimmer", "verse"]
+EDGE_VOICES = ["en-US-AriaNeural", "en-US-GuyNeural", "en-US-JennyNeural",
+               "en-GB-RyanNeural", "en-GB-SoniaNeural",
+               "he-IL-AvriNeural", "he-IL-HilaNeural"]
+
+
 def tts_available() -> bool:
     if OPENAI_API_KEY:
         return True
@@ -60,19 +69,49 @@ def tts_available() -> bool:
         return False
 
 
-async def synthesize(text: str) -> tuple[str, bool] | None:
+def active_backend() -> str | None:
+    """Which TTS engine voices should be offered for — the one that will
+    actually render. OpenAI wins when keyed; edge is the free fallback."""
+    if OPENAI_API_KEY:
+        return "openai"
+    try:
+        import edge_tts  # noqa: F401
+        return "edge"
+    except ImportError:
+        return None
+
+
+def list_voices() -> tuple[str | None, list[str]]:
+    """(backend, voice names) for the active engine; ([] if none available)."""
+    backend = active_backend()
+    if backend == "openai":
+        return backend, OPENAI_VOICES
+    if backend == "edge":
+        return backend, EDGE_VOICES
+    return None, []
+
+
+def default_voice(backend: str | None = None) -> str:
+    backend = backend or active_backend()
+    return TTS_VOICE if backend == "openai" else TTS_EDGE_VOICE
+
+
+async def synthesize(text: str, voice: str = "") -> tuple[str, bool] | None:
     """Return (path, is_voice_note). is_voice_note=True means OGG/Opus
-    (Telegram voice bubble); False means mp3 (audio message)."""
+    (Telegram voice bubble); False means mp3 (audio message). `voice` overrides
+    the configured default for the active backend."""
     text = text.strip()[:1500]
     if not text:
         return None
     if OPENAI_API_KEY:
+        # an edge voice name (…Neural) makes no sense here — fall back to default
+        ovoice = voice if (voice and "Neural" not in voice) else TTS_VOICE
         try:
             async with httpx.AsyncClient(timeout=120) as client:
                 r = await client.post(
                     "https://api.openai.com/v1/audio/speech",
                     headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-                    json={"model": "gpt-4o-mini-tts", "voice": TTS_VOICE,
+                    json={"model": "gpt-4o-mini-tts", "voice": ovoice,
                           "input": text, "response_format": "opus"})
             if r.status_code == 200:
                 fd = tempfile.NamedTemporaryFile(suffix=".ogg", delete=False,
@@ -87,10 +126,12 @@ async def synthesize(text: str) -> tuple[str, bool] | None:
             log.warning("openai tts failed: %s", e)
     try:
         import edge_tts
+        # only honour an edge-shaped voice name on this backend
+        evoice = voice if (voice and "Neural" in voice) else TTS_EDGE_VOICE
         fd = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False,
                                          dir=str(TMP_DIR))
         fd.close()
-        await edge_tts.Communicate(text, TTS_EDGE_VOICE).save(fd.name)
+        await edge_tts.Communicate(text, evoice).save(fd.name)
         return fd.name, False
     except ImportError:
         return None

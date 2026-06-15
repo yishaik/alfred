@@ -398,6 +398,45 @@ async def cmd_soul(update: Update, ctx):
         "/soul add values|quirks <text> · /soul clear")
 
 
+def voice_kb(current: str, names: list) -> InlineKeyboardMarkup:
+    rows, row = [], []
+    for v in names:
+        mark = "● " if v == current else ""
+        short = v.replace("Neural", "").replace("-", " ") if "Neural" in v else v
+        row.append(InlineKeyboardButton(f"{mark}{short}", callback_data=f"voi:{v}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("🔄 default", callback_data="voi:")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def cmd_voice(update: Update, ctx):
+    """Pick the TTS voice for this agent (issue #3 voice picker)."""
+    s = await _session(update, ctx)
+    backend, names = voice.list_voices()
+    if not backend:
+        await update.message.reply_text(
+            "🔇 no TTS backend — set OPENAI_API_KEY or `pip install edge-tts`")
+        return
+    arg = " ".join(ctx.args or []).strip()
+    if arg:
+        if arg not in names:
+            await update.message.reply_text(
+                f"unknown voice for {backend}. options: {', '.join(names)}")
+            return
+        s.cfg.voice = arg
+        mgr(ctx).save_agents()
+        await update.message.reply_text(f"🔊 voice → {arg}")
+        return
+    cur = s.cfg.voice or voice.default_voice(backend)
+    await update.message.reply_text(
+        f"🔊 pick a voice ({backend}) — current: {cur}",
+        reply_markup=voice_kb(s.cfg.voice, names))
+
+
 async def cmd_tts(update: Update, ctx):
     s, val, note = await _toggle(update, ctx, "tts",
                                  "🔊 voice replies ON", "🔇 voice replies off")
@@ -795,6 +834,13 @@ async def on_callback(update: Update, ctx):
         else:
             applied = "after /restart"
         await _edit(q, f"🧠 model → {model or 'default'} ({applied})", panel_kb(s))
+    elif data.startswith("voi:"):
+        v = data.split(":", 1)[1]
+        s.cfg.voice = v
+        m.save_agents()
+        shown = v or f"default ({voice.default_voice()})"
+        await _edit(q, f"🔊 voice → {shown}"
+                       + ("" if s.cfg.tts else " (turn on with /tts)"))
     elif data == "agn":
         await _edit(q, "Create one with: /newagent <name> [workdir]\n"
                        "e.g. /newagent research D:\\Projects\\research",
