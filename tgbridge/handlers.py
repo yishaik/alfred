@@ -162,8 +162,9 @@ async def cmd_panel(update: Update, ctx):
     ctx_part = (f" · {_ctx_bar(s.ctx_pct)} {s.ctx_pct:.0f}%"
                 if s.ctx_pct is not None else "")
     tts_part = " · 🔊" if s.cfg.tts else ""
+    mood_part = f" · {s.mood.label()}" if s.cfg.soul.is_set() else ""
     header = (f"⚡ {s.cfg.name} · 🧠 {_pretty_model(s.model) or 'default'} · "
-              f"💰 ${m.today_cost():.2f} today{ctx_part}{tts_part}")
+              f"💰 ${m.today_cost():.2f} today{ctx_part}{tts_part}{mood_part}")
     await update.message.reply_text(header, reply_markup=panel_kb(s))
 
 
@@ -326,7 +327,7 @@ async def cmd_soul(update: Update, ctx):
 
     if not sub or sub == "show":
         await update.message.reply_text(
-            soul.render_card() + "\n\n"
+            soul.render_card() + f"\n\ncurrent mood: {s.mood.label()}\n\n"
             "edit: /soul set <field> <value> · /soul add values|quirks <text>\n"
             "fields: display_name emoji role tone notes\n"
             f"presets: {', '.join(PRESETS)} (/soul preset <name>)")

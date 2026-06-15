@@ -35,6 +35,7 @@ from .config import (BOT_TURNS_PER_HOUR, CHAT_ID, CLAUDE_BIN, CONTEXT_WARN_PCT,
                      WORKDIR)
 from .fmt import (SEP, fmt_duration, format_error, format_output,
                   format_tool_lines, summarize_tool, tool_icon)
+from .mood import Mood
 from .outbox import Outbox
 from .soul import Soul
 from .ratelimit import Backoff, TokenBucket
@@ -186,6 +187,7 @@ class AgentSession:
         self.slash_commands: list[str] = []
         self.stderr_tail: deque[str] = deque(maxlen=40)
         self.backoff = Backoff()
+        self.mood = Mood()
         self.bot_turn_bucket = TokenBucket(BOT_TURNS_PER_HOUR, 3600.0)
         self.always_allow: set[str] = set(cfg.always_allow)
         # interactive state
@@ -396,9 +398,13 @@ class AgentSession:
         self.turn_user_uuid = None
         self.turn_files_touched = False
         self._turn_had_tools = False
+        # mood: prepend a one-line tone nudge only when the weather has shifted
+        # (pop_nudge returns "" if unchanged) so we never spam the turn stream.
+        nudge = self.mood.pop_nudge()
+        sent = f"[mood — {nudge}]\n{text}" if nudge else text
         self._react("👀")          # acknowledge: working on it
         try:
-            await self.client.query(text)
+            await self.client.query(sent)
         except Exception as e:
             self.busy = False
             metrics.bump("send_fail")
@@ -431,6 +437,7 @@ class AgentSession:
     async def _crash_restart(self):
         self.connected = False
         self.busy = False
+        self.mood.note_restart(crashed=True)   # next turn will be a touch careful
         delay, drop_resume = self.backoff.record()
         tail = "\n".join(list(self.stderr_tail)[-3:])
         note = f"⚠️ Claude exited. Restarting in {delay:.0f}s…"
@@ -587,6 +594,7 @@ class AgentSession:
         if isinstance(msg, ResultMessage):
             self.busy = False
             self.backoff.reset()
+            self.mood.note_result(bool(msg.is_error))   # update emotional weather
             self._react("😱" if msg.is_error else "👍")   # done
             dur = time.monotonic() - self.turn_started
             today, budget_alert = self.mgr.add_cost(msg.total_cost_usd or 0.0)
