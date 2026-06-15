@@ -11,7 +11,8 @@ from . import metrics, voice
 from .config import (APP_LOG_FILE, AUDIT_FILE, GROUP_ID, INBOX, MAX_JOBS,
                      PEERS, authorized_chat)
 from .manager import AgentManager
-from .session import TurnSource
+from .fmt import SEP
+from .session import TurnSource, _ctx_bar, _pretty_model
 
 log = logging.getLogger("bridge.handlers")
 
@@ -117,20 +118,21 @@ def jobs_kb(m: AgentManager) -> tuple[str, InlineKeyboardMarkup]:
 
 
 def _status_text(m: AgentManager) -> str:
-    lines = ["📂 Bridge status"]
+    lines = ["📂 𝗕𝗿𝗶𝗱𝗴𝗲 𝗦𝘁𝗮𝘁𝘂𝘀", SEP]
     if m.sessions:
         lines += [s.status_line() for s in m.sessions.values()]
     else:
         lines.append("(no live sessions)")
-    lines.append(f"active agent: {m.active} · today ${m.today_cost():.2f} "
-                 f"· month ${m.month_cost():.2f}")
+    lines.append(SEP)
+    lines.append(f"⭐ active: {m.active}")
+    lines.append(f"💰 today ${m.today_cost():.2f} · month ${m.month_cost():.2f}")
     if m.scheduler and m.scheduler.jobs:
-        lines.append(f"jobs: {len(m.scheduler.jobs)} (/jobs)")
+        lines.append(f"⏰ {len(m.scheduler.jobs)} jobs (/jobs)")
     if PEERS:
-        lines.append("peers: " + ", ".join(PEERS))
+        lines.append("🔌 peers: " + ", ".join(PEERS))
     counters = metrics.summary()
     if counters:
-        lines.append(f"counters: {counters}")
+        lines.append(f"📊 {counters}")
     return "\n".join(lines)
 
 
@@ -140,24 +142,28 @@ def _status_text(m: AgentManager) -> str:
 async def cmd_start(update: Update, ctx):
     s = await _session(update, ctx)
     await update.message.reply_text(
-        "🤖 Claude bridge online\n"
-        f"agent: {s.cfg.name} · cwd: {s.cfg.workdir}\n"
-        f"model: {s.model or 'default'}\n\n"
-        "Type anything to talk to Claude; /slashcommands pass straight through.\n"
-        "Bridge: /panel /status /agents /jobs /remind /sessions /fork\n"
-        "        /restart /interrupt /kill\n"
-        "Per-agent: /auto /secretary /tts /cwd /bind /newagent /delagent\n"
-        "React 👎 to a message to interrupt; edit your last message to correct it.",
+        "🤖 𝗖𝗹𝗮𝘂𝗱𝗲 𝗕𝗿𝗶𝗱𝗴𝗲 𝗼𝗻𝗹𝗶𝗻𝗲\n"
+        f"{SEP}\n"
+        f"⚡ agent: {s.cfg.name}\n"
+        f"🧠 model: {_pretty_model(s.model) or 'default'}\n"
+        f"📂 cwd: {s.cfg.workdir}\n"
+        f"{SEP}\n"
+        "Type anything to talk to Claude; /slashcommands pass straight through.\n\n"
+        "🎛 Bridge: /panel /status /agents /jobs /remind /sessions /fork\n"
+        "          /restart /interrupt /kill\n"
+        "👤 Per-agent: /auto /secretary /tts /cwd /bind /newagent /delagent\n\n"
+        "💡 React 👎 to interrupt · edit your last message to correct it.",
         reply_markup=panel_kb(s))
 
 
 async def cmd_panel(update: Update, ctx):
     s = await _session(update, ctx)
     m = mgr(ctx)
-    ctx_part = f" · ctx {s.ctx_pct:.0f}%" if s.ctx_pct is not None else ""
+    ctx_part = (f" · {_ctx_bar(s.ctx_pct)} {s.ctx_pct:.0f}%"
+                if s.ctx_pct is not None else "")
     tts_part = " · 🔊" if s.cfg.tts else ""
-    header = (f"⚡ {s.cfg.name} · {s.model or 'default'} · "
-              f"${m.today_cost():.2f} today{ctx_part}{tts_part}")
+    header = (f"⚡ {s.cfg.name} · 🧠 {_pretty_model(s.model) or 'default'} · "
+              f"💰 ${m.today_cost():.2f} today{ctx_part}{tts_part}")
     await update.message.reply_text(header, reply_markup=panel_kb(s))
 
 
@@ -474,6 +480,19 @@ async def on_text(update: Update, ctx):
     s = await _session(update, ctx)
     msg = update.message
     text = msg.text
+    # Resolve a pending "Other / type your answer" question without re-feeding Claude
+    for qid, st in list(s.questions.items()):
+        if st.get("waiting_text") and not st["future"].done():
+            if st.get("message_id"):
+                try:
+                    await mgr(ctx).bot.edit_message_text(
+                        f"❓ {st['q']}\n✅ {text[:200]}",
+                        chat_id=s.chat_id,
+                        message_id=st["message_id"])
+                except Exception:
+                    pass
+            st["future"].set_result(text)
+            return
     r = msg.reply_to_message
     if r and (r.text or r.caption) and not text.startswith("/"):
         text = f"[replying to: «{(r.text or r.caption)[:300]}»]\n{text}"
@@ -811,9 +830,7 @@ async def _session_cb(q, s, tag: str, rest: list[str]):
             st["future"].set_result(ans)
     elif tag == "qo":
         await _edit(q, f"❓ {st['q']}\n✏️ Type your answer below.")
-        if not st["future"].done():
-            st["future"].set_result(
-                "(the user will type the answer as their next message — wait for it)")
+        st["waiting_text"] = True  # on_text will resolve the future when user types
     elif tag == "bt":
         bid, idx = int(rest[0]), int(rest[1])
         labels = s.kb_store.get(bid)
