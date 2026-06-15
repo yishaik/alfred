@@ -316,6 +316,75 @@ async def cmd_bind(update: Update, ctx):
         f"🔗 this topic now talks to agent {name} (fresh session on next message)")
 
 
+async def cmd_soul(update: Update, ctx):
+    """View or edit an agent's character sheet (the structured persona)."""
+    from .soul import PRESETS
+    s = await _session(update, ctx)
+    soul = s.cfg.soul
+    args = ctx.args or []
+    sub = args[0].lower() if args else ""
+
+    if not sub or sub == "show":
+        await update.message.reply_text(
+            soul.render_card() + "\n\n"
+            "edit: /soul set <field> <value> · /soul add values|quirks <text>\n"
+            "fields: display_name emoji role tone notes\n"
+            f"presets: {', '.join(PRESETS)} (/soul preset <name>)")
+        return
+
+    if sub == "preset":
+        name = (args[1] if len(args) > 1 else "").lower()
+        if name not in PRESETS:
+            await update.message.reply_text(
+                f"unknown preset. available: {', '.join(PRESETS)}")
+            return
+        from .soul import Soul
+        s.cfg.soul = Soul.from_dict(PRESETS[name].to_dict())
+        mgr(ctx).save_agents()
+        await update.message.reply_text(
+            f"🎭 loaded preset “{name}”:\n\n{s.cfg.soul.render_card()}\n\n"
+            "restart the session to apply in-character (/restart).")
+        return
+
+    if sub == "clear":
+        from .soul import Soul
+        s.cfg.soul = Soul()
+        mgr(ctx).save_agents()
+        await update.message.reply_text("🎭 character cleared — plain voice. "
+                                        "/restart to apply.")
+        return
+
+    if sub == "set" and len(args) >= 3:
+        field_name = args[1].lower()
+        if field_name not in soul.EDITABLE:
+            await update.message.reply_text(
+                f"can't set “{field_name}”. settable: {', '.join(soul.EDITABLE)}")
+            return
+        value = " ".join(args[2:])
+        setattr(soul, field_name, value)
+        mgr(ctx).save_agents()
+        await update.message.reply_text(
+            f"🎭 {field_name} → {value}\n/restart to apply.")
+        return
+
+    if sub == "add" and len(args) >= 3:
+        field_name = args[1].lower()
+        if field_name not in soul.LIST_FIELDS:
+            await update.message.reply_text(
+                f"can't add to “{field_name}”. list fields: "
+                f"{', '.join(soul.LIST_FIELDS)}")
+            return
+        getattr(soul, field_name).append(" ".join(args[2:]))
+        mgr(ctx).save_agents()
+        await update.message.reply_text(
+            f"🎭 added to {field_name}.\n{soul.render_card()}\n/restart to apply.")
+        return
+
+    await update.message.reply_text(
+        "usage: /soul · /soul preset <name> · /soul set <field> <value> · "
+        "/soul add values|quirks <text> · /soul clear")
+
+
 async def cmd_tts(update: Update, ctx):
     s, val, note = await _toggle(update, ctx, "tts",
                                  "🔊 voice replies ON", "🔇 voice replies off")

@@ -33,8 +33,10 @@ from . import metrics
 from .config import (BOT_TURNS_PER_HOUR, CHAT_ID, CLAUDE_BIN, CONTEXT_WARN_PCT,
                      MODEL, PERMISSION_TIMEOUT, TMP_DIR, TURN_WARN_SECONDS,
                      WORKDIR)
-from .fmt import (SEP, fmt_duration, format_error, summarize_tool, tool_icon)
+from .fmt import (SEP, fmt_duration, format_error, format_output,
+                  format_tool_lines, summarize_tool, tool_icon)
 from .outbox import Outbox
+from .soul import Soul
 from .ratelimit import Backoff, TokenBucket
 
 FILE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
@@ -60,6 +62,15 @@ def _ctx_bar(pct: float, segs: int = 10) -> str:
     """A 10-segment gauge like ▰▰▰▰▱▱▱▱▱▱ for the context footer."""
     filled = max(0, min(segs, round(pct / 100 * segs)))
     return "▰" * filled + "▱" * (segs - filled)
+
+
+def _cost_emoji(cost: float) -> str:
+    """Traffic-light cue for a turn's cost: cheap 💚 / moderate 💛 / pricey ❤️."""
+    if cost < 0.02:
+        return "💚"
+    if cost < 0.10:
+        return "💛"
+    return "❤️"
 
 # Read-only / harmless tools that never need a tap even with approvals on.
 SAFE_TOOLS = ["Read", "Glob", "Grep", "WebSearch", "WebFetch", "TodoWrite",
@@ -119,7 +130,7 @@ class AgentConfig:
     name: str
     workdir: str = WORKDIR
     model: str = MODEL
-    persona: str = ""
+    soul: Soul = field(default_factory=Soul)
     secretary: bool = False
     auto_approve: bool = True
     tts: bool = False
@@ -127,14 +138,20 @@ class AgentConfig:
 
     def to_dict(self):
         return {"workdir": self.workdir, "model": self.model,
-                "persona": self.persona, "secretary": self.secretary,
+                "soul": self.soul.to_dict(), "secretary": self.secretary,
                 "auto_approve": self.auto_approve, "tts": self.tts,
                 "always_allow": sorted(self.always_allow)}
 
     @classmethod
     def from_dict(cls, name, d):
+        # migration: an agent saved before the character sheet kept a free-text
+        # `persona` string — fold it into the soul's notes so nothing is lost.
+        if "soul" in d:
+            soul = Soul.from_dict(d["soul"])
+        else:
+            soul = Soul(notes=d.get("persona", ""))
         return cls(name=name, workdir=d.get("workdir", WORKDIR),
-                   model=d.get("model", MODEL), persona=d.get("persona", ""),
+                   model=d.get("model", MODEL), soul=soul,
                    secretary=bool(d.get("secretary")),
                    auto_approve=bool(d.get("auto_approve", True)),
                    tts=bool(d.get("tts")),
@@ -198,12 +215,17 @@ class AgentSession:
         self._task_progress_ts: dict[str, float] = {}
         self._streaming_tools: list[str] = []
         self._turn_had_tools = False
+        self._shell_calls: dict[str, bool] = {}   # tool_use_id -> shell? (Bash/PS)
 
     def _prefix(self) -> str:
         # label output whenever "who is talking" isn't obvious: any group/topic
-        # session, or a non-active agent speaking into the private chat
+        # session, or a non-active agent speaking into the private chat. Use the
+        # soul's avatar + display name when set (issue #4 persona display).
         if self.chat_id != CHAT_ID or self.cfg.name != self.mgr.active:
-            return f"🤖 {self.cfg.name}:\n"
+            soul = self.cfg.soul
+            icon = soul.emoji or "🤖"
+            label = soul.display_name or self.cfg.name
+            return f"{icon} {label}:\n"
         return ""
 
     def _react(self, emoji: str):
@@ -225,8 +247,9 @@ class AgentSession:
     # -- lifecycle ----------------------------------------------------------- #
     def _options(self, fork: bool = False) -> ClaudeAgentOptions:
         prompt = BRIDGE_PROMPT + f"\n\nYour agent name on this bridge: {self.cfg.name}."
-        if self.cfg.persona:
-            prompt += f"\n\nPERSONA:\n{self.cfg.persona}"
+        soul_block = self.cfg.soul.render_prompt()
+        if soul_block:
+            prompt += f"\n\n{soul_block}"
         if self.cfg.secretary:
             prompt += SECRETARY_PROMPT
         return ClaudeAgentOptions(
@@ -507,14 +530,17 @@ class AgentSession:
                         self.turn_files_touched = True
                     if block.name.startswith(f"mcp__{bridgetools.SERVER_NAME}__"):
                         continue  # bridge tools narrate themselves
+                    if block.name in ("Bash", "PowerShell"):
+                        self._shell_calls[block.id] = True
+                        if len(self._shell_calls) > 50:
+                            self._shell_calls.pop(next(iter(self._shell_calls)))
                     summ = summarize_tool(block.name, block.input)
                     # Skip re-emitting if live banner already showed this tool
                     # and there's no richer summary to add
                     if block.name in pre_shown and not summ:
                         pre_shown.remove(block.name)
                         continue
-                    tools.append(f"{tool_icon(block.name)} **{block.name}**"
-                                 + (f"  {summ}" if summ else ""))
+                    tools.append((block.name, summ))
             full = "\n".join(t for t in texts if t)
             parsed = markers.parse(full)
             markup = self._kb_markup(parsed.buttons) if parsed.buttons else None
@@ -531,7 +557,7 @@ class AgentSession:
             await self.mgr.handle_markers(self, parsed)
             if tools:
                 self._turn_had_tools = True
-            for line in tools:
+            for line in format_tool_lines(tools):
                 self.outbox.emit(line)
             if self.cfg.tts and parsed.text:
                 asyncio.create_task(self._speak(parsed.text))
@@ -544,12 +570,18 @@ class AgentSession:
             content = msg.content
             if isinstance(content, list):
                 for block in content:
-                    if isinstance(block, ToolResultBlock) and block.is_error:
-                        c = block.content
-                        if isinstance(c, list):
-                            c = " ".join(x.get("text", "") for x in c
-                                         if isinstance(x, dict))
+                    if not isinstance(block, ToolResultBlock):
+                        continue
+                    c = block.content
+                    if isinstance(c, list):
+                        c = " ".join(x.get("text", "") for x in c
+                                     if isinstance(x, dict))
+                    if block.is_error:
                         self.outbox.emit(format_error(str(c)))
+                    elif self._shell_calls.pop(block.tool_use_id, False):
+                        out = format_output(str(c))
+                        if out:
+                            self.outbox.emit(out)
             return
 
         if isinstance(msg, ResultMessage):
@@ -561,6 +593,19 @@ class AgentSession:
             foot = f"✅ {fmt_duration(dur)}"
             if self.model:
                 foot += f" · {_pretty_model(self.model)}"
+            if msg.total_cost_usd:
+                foot += (f" · {_cost_emoji(msg.total_cost_usd)} "
+                         f"${msg.total_cost_usd:.4f} · today ${today:.2f}")
+            u = msg.usage or {}
+            t_in = (u.get("input_tokens", 0)
+                    + u.get("cache_creation_input_tokens", 0)
+                    + u.get("cache_read_input_tokens", 0))
+            t_out = u.get("output_tokens", 0)
+            if t_in or t_out:
+                foot += f" · 📊 {_tok(t_in)}→{_tok(t_out)} tok"
+                cached = u.get("cache_read_input_tokens", 0)
+                if cached:
+                    foot += f" ({_tok(cached)} cached)"
             if msg.subtype and msg.subtype != "success":
                 foot += f" · {msg.subtype}"
             if msg.is_error:
@@ -647,8 +692,8 @@ class AgentSession:
         ]])
         cmd = (tool_input.get("command") or "")[:600]
         self.outbox.keyboard(
-            f"⚠️ DANGEROUS command wants to run (matched `{matched}`):\n"
-            f"```\n{cmd}\n```", kb)
+            f"🔴 **Dangerous command** · matched `{matched}`\n"
+            f"```bash\n{cmd}\n```", kb)
         try:
             verdict = await asyncio.wait_for(fut, timeout=PERMISSION_TIMEOUT)
         except asyncio.TimeoutError:
@@ -691,8 +736,15 @@ class AgentSession:
             InlineKeyboardButton("🔁 Always", callback_data=f"pm:{self.sid}:{pid}:s"),
             InlineKeyboardButton("⛔ Deny", callback_data=f"pm:{self.sid}:{pid}:d"),
         ]])
+        if tool_name in ("Bash", "PowerShell") and summ:
+            subj = f"\n```bash\n{summ[:500]}\n```"
+        elif summ:
+            subj = f"\n`{summ[:300]}`"
+        else:
+            subj = ""
         self.outbox.keyboard(
-            f"🔐 Permission{agent_note}: {tool_name}\n{summ[:500]}", kb)
+            f"🔐 **Permission needed**{agent_note}\n"
+            f"{tool_icon(tool_name)} **{tool_name}**{subj}", kb)
         try:
             verdict = await asyncio.wait_for(fut, timeout=PERMISSION_TIMEOUT)
         except asyncio.TimeoutError:
@@ -834,11 +886,20 @@ class AgentSession:
 
     def status_line(self) -> str:
         state = "🟢" if self.connected else "🔴"
-        busy = f"busy {fmt_duration(time.monotonic() - self.turn_started)}" \
-            if self.busy else "idle"
-        ctx = f" · ctx {self.ctx_pct:.0f}%" if self.ctx_pct is not None else ""
-        return (f"{state} {self.cfg.name} [{self.skey}] · {busy} · "
-                f"queued {len(self.pending)} · model {self.model or 'default'} · "
-                f"{'auto✅' if self.cfg.auto_approve else 'approvals🔐'}"
-                f"{' · 📋secretary' if self.cfg.secretary else ''}"
-                f"{' · 🔊tts' if self.cfg.tts else ''}{ctx}")
+        busy = (f"⏳ busy {fmt_duration(time.monotonic() - self.turn_started)}"
+                if self.busy else "💤 idle")
+        head = (f"{state} {self.cfg.name} · 🧠 {_pretty_model(self.model) or 'default'}"
+                f" · {'auto✅' if self.cfg.auto_approve else 'approvals🔐'}")
+        badges = []
+        if self.cfg.secretary:
+            badges.append("📋 secretary")
+        if self.cfg.tts:
+            badges.append("🔊 tts")
+        if self.pending:
+            badges.append(f"📥 {len(self.pending)} queued")
+        det = f"   {busy}"
+        if self.ctx_pct is not None:
+            det += f" · {_ctx_bar(self.ctx_pct)} {self.ctx_pct:.0f}%"
+        if badges:
+            det += " · " + " · ".join(badges)
+        return head + "\n" + det
