@@ -16,8 +16,10 @@ from datetime import date, datetime, timedelta
 from . import metrics
 from .config import (AGENTS_FILE, BACKUP_DIR, CHAT_ID, COSTS_FILE, HEALTH_TIME,
                      LEGACY_SESSION_FILE, MAX_HOPS, MONTHLY_BUDGET_USD,
-                     PAIR_MSGS_PER_5MIN, ROOT, SESSIONS_FILE, STATE_DIR,
-                     TOPICS_FILE, load_json, save_json, system_drive_free_gb)
+                     PAIR_MSGS_PER_5MIN, PROACTIVE_IDLE_HOURS,
+                     PROACTIVE_QUIET_END, PROACTIVE_QUIET_START, ROOT,
+                     SESSIONS_FILE, STATE_DIR, TOPICS_FILE, load_json,
+                     save_json, system_drive_free_gb)
 from .ratelimit import PairLimiter
 from .session import AgentConfig, AgentSession, TurnSource
 
@@ -59,6 +61,7 @@ class AgentManager:
         self._budget_warned: set[int] = set()   # thresholds already announced this month
         self._budget_month = date.today().strftime("%Y-%m")
         self._health_task: asyncio.Task | None = None
+        self._proactive_task: asyncio.Task | None = None
 
     def _migrate_legacy(self):
         if "main@p" not in self.session_ids and LEGACY_SESSION_FILE.exists():
@@ -191,9 +194,43 @@ class AgentManager:
     async def stop_all(self):
         if self._health_task:
             self._health_task.cancel()
+        if self._proactive_task:
+            self._proactive_task.cancel()
         for s in list(self.sessions.values()):
             await s.stop()
             await s.outbox.stop()
+
+    # -- proactive idle check-ins --------------------------------------------#
+    def start_proactive_loop(self):
+        """Background loop letting opt-in agents volunteer a thought after a
+        long idle gap (issue #5). Disabled wholesale if the idle threshold is
+        non-positive."""
+        if PROACTIVE_IDLE_HOURS > 0:
+            self._proactive_task = asyncio.create_task(self._proactive_loop())
+
+    async def _proactive_loop(self):
+        import time as _time
+        from .proactive import CHECKIN_PROMPT, should_check_in
+        threshold = PROACTIVE_IDLE_HOURS * 3600.0
+        while True:
+            try:
+                await asyncio.sleep(300)   # check every 5 min; idle gap is hours
+                now_hour = datetime.now().hour
+                for s in list(self.sessions.values()):
+                    idle = _time.monotonic() - s.last_activity
+                    if not should_check_in(
+                            idle, threshold, now_hour,
+                            PROACTIVE_QUIET_START, PROACTIVE_QUIET_END,
+                            enabled=s.cfg.proactive, busy=s.busy,
+                            already_pinged=not s.proactive_armed):
+                        continue
+                    # fire once per idle stretch; re-armed when the user speaks
+                    s.proactive_armed = False
+                    await s.feed(CHECKIN_PROMPT, TurnSource(kind="proactive"))
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                log.exception("proactive loop tick failed")
 
     # -- daily health report --------------------------------------------------#
     def start_health_loop(self):

@@ -32,6 +32,7 @@ BOT_COMMANDS = [
     ("auto", "toggle tap-to-approve"),
     ("secretary", "toggle secretary mode"),
     ("soul", "view/edit the agent's character"),
+    ("proactive", "toggle idle check-ins"),
     ("tts", "toggle voice replies"),
     ("audit", "recent tool calls"),
     ("logs", "recent warnings/errors"),
@@ -65,6 +66,7 @@ async def post_init(app):
     m.peers = PeerBus(m)
     await m.peers.start()
     m.start_health_loop()
+    m.start_proactive_loop()
     try:
         await app.bot.set_my_commands(BOT_COMMANDS)
     except Exception:
@@ -169,6 +171,7 @@ def main():
         "auto": handlers.cmd_auto,
         "secretary": handlers.cmd_secretary,
         "soul": handlers.cmd_soul,
+        "proactive": handlers.cmd_proactive,
         "cwd": handlers.cmd_cwd,
         "bind": handlers.cmd_bind,
         "jobs": handlers.cmd_jobs,
