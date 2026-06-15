@@ -264,6 +264,41 @@ def test_session_pure():
           AgentConfig.from_dict("x", cfg.to_dict()).secretary is True)
 
 
+def test_proactive():
+    from tgbridge.proactive import (declined, is_quiet_hour, should_check_in,
+                                    SENTINEL)
+
+    # quiet-hour math, including a window that wraps midnight (22 -> 8)
+    check("quiet wraps into night", is_quiet_hour(23, 22, 8))
+    check("quiet wraps past midnight", is_quiet_hour(3, 22, 8))
+    check("daytime not quiet", not is_quiet_hour(14, 22, 8))
+    check("non-wrap window", is_quiet_hour(1, 0, 6) and not is_quiet_hour(7, 0, 6))
+    check("empty window never quiet", not is_quiet_hour(5, 9, 9))
+
+    thr = 6 * 3600
+    base = dict(idle_threshold_seconds=thr, now_hour=14, quiet_start=22,
+                quiet_end=8, enabled=True, busy=False, already_pinged=False)
+    check("checks in when idle long enough",
+          should_check_in(idle_seconds=thr + 1, **base))
+    check("not before threshold",
+          not should_check_in(idle_seconds=thr - 1, **base))
+    check("not when disabled",
+          not should_check_in(idle_seconds=thr + 1, **{**base, "enabled": False}))
+    check("not when busy",
+          not should_check_in(idle_seconds=thr + 1, **{**base, "busy": True}))
+    check("not twice per idle stretch",
+          not should_check_in(idle_seconds=thr + 1,
+                              **{**base, "already_pinged": True}))
+    check("not during quiet hours",
+          not should_check_in(idle_seconds=thr + 1, **{**base, "now_hour": 3}))
+
+    # the silence test is tolerant of casing / punctuation / whitespace
+    check("sentinel is silence", declined(SENTINEL))
+    check("empty is silence", declined("   "))
+    check("punctuated sentinel is silence", declined("Nothing."))
+    check("real text is not silence", declined("you left the PR unmerged") is False)
+
+
 def test_mood():
     from tgbridge.mood import Mood, ERROR_STREAK, WIN_STREAK, LONG_TURNS
 
@@ -434,6 +469,7 @@ if __name__ == "__main__":
     test_session_pure()
     test_soul()
     test_mood()
+    test_proactive()
     test_singleton_lock()
     asyncio.run(test_question_serialization())
     asyncio.run(test_peer_protocol())

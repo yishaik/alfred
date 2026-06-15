@@ -112,6 +112,18 @@ TURN_WARN_SECONDS = int(os.environ.get("BRIDGE_TURN_WARN_SECONDS", "600"))    # 
 SEND_MIN_INTERVAL = 1.05      # seconds between Telegram sends per chat (~Telegram's 1 msg/s)
 EDIT_MIN_INTERVAL = 1.5       # seconds between streaming draft edits
 
+# Proactive idle check-ins (opt-in per agent via /proactive)
+PROACTIVE_IDLE_HOURS = float(os.environ.get("BRIDGE_PROACTIVE_IDLE_HOURS", "6"))
+# do-not-disturb window "start-end" in 24h hours; may wrap midnight (default 22-8)
+def _parse_quiet(raw: str) -> tuple[int, int]:
+    try:
+        a, _, b = raw.partition("-")
+        return int(a) % 24, int(b) % 24
+    except ValueError:
+        return 22, 8
+PROACTIVE_QUIET_START, PROACTIVE_QUIET_END = \
+    _parse_quiet(os.environ.get("BRIDGE_PROACTIVE_QUIET", "22-8"))
+
 # Ops
 HEALTH_TIME = os.environ.get("BRIDGE_HEALTH_TIME", "09:00")      # "" disables the daily report
 MONTHLY_BUDGET_USD = float(os.environ.get("BRIDGE_MONTHLY_BUDGET_USD", "0"))  # 0 = off

@@ -135,12 +135,14 @@ class AgentConfig:
     secretary: bool = False
     auto_approve: bool = True
     tts: bool = False
+    proactive: bool = False
     always_allow: list = field(default_factory=list)
 
     def to_dict(self):
         return {"workdir": self.workdir, "model": self.model,
                 "soul": self.soul.to_dict(), "secretary": self.secretary,
                 "auto_approve": self.auto_approve, "tts": self.tts,
+                "proactive": self.proactive,
                 "always_allow": sorted(self.always_allow)}
 
     @classmethod
@@ -156,6 +158,7 @@ class AgentConfig:
                    secretary=bool(d.get("secretary")),
                    auto_approve=bool(d.get("auto_approve", True)),
                    tts=bool(d.get("tts")),
+                   proactive=bool(d.get("proactive")),
                    always_allow=list(d.get("always_allow", [])))
 
 
@@ -206,6 +209,12 @@ class AgentSession:
         self._last_rl_note = 0.0
         self._last_warn = 0.0
         self._turn_text_streamed = False
+        # proactive idle check-ins: stamp of last user activity, an "armed"
+        # flag reset whenever the user speaks (one ping per idle stretch), and
+        # a per-turn flag set when a check-in chose silence (suppress output).
+        self.last_activity = time.monotonic()
+        self.proactive_armed = True
+        self._proactive_silent = False
         # undo / context / tasks / telegram-native state
         self.turn_user_uuid: str | None = None
         self.turn_files_touched = False
@@ -363,6 +372,10 @@ class AgentSession:
     async def feed(self, text: str, source: TurnSource | None = None,
                    echo: bool = False) -> bool:
         source = source or TurnSource()
+        if source.kind == "user":
+            # the user is back — reset the idle clock and re-arm proactive
+            self.last_activity = time.monotonic()
+            self.proactive_armed = True
         if source.kind != "user" and not self.bot_turn_bucket.allow():
             self.outbox.emit(
                 f"🚦 dropped {source.kind} turn (rate limit "
@@ -394,6 +407,7 @@ class AgentSession:
         self.busy = True
         self.turn_started = time.monotonic()
         self.turn_source = source
+        self._proactive_silent = False
         self._turn_text_streamed = False
         self.turn_user_uuid = None
         self.turn_files_touched = False
@@ -511,6 +525,11 @@ class AgentSession:
             elif ev_type == "content_block_delta":
                 delta = ev.get("delta", {})
                 if delta.get("type") == "text_delta":
+                    # don't live-stream a proactive check-in: it might decline
+                    # with the silence sentinel, which we suppress wholesale at
+                    # AssistantMessage time. Buffer it instead of flashing it.
+                    if self.turn_source.kind == "proactive":
+                        return
                     self._turn_text_streamed = True
                     self.outbox.stream_delta(delta.get("text", ""))
             return
@@ -550,6 +569,14 @@ class AgentSession:
                     tools.append((block.name, summ))
             full = "\n".join(t for t in texts if t)
             parsed = markers.parse(full)
+            # proactive check-in that chose silence: drop the whole turn quietly
+            if self.turn_source.kind == "proactive":
+                from .proactive import declined
+                if declined(parsed.text):
+                    self._proactive_silent = True
+                    return
+                # it has something to say — mark it as a spontaneous thought
+                parsed.text = "💭 " + parsed.text
             markup = self._kb_markup(parsed.buttons) if parsed.buttons else None
             if self._turn_text_streamed:
                 self.outbox.stream_close(parsed.text, markup)
@@ -595,6 +622,13 @@ class AgentSession:
             self.busy = False
             self.backoff.reset()
             self.mood.note_result(bool(msg.is_error))   # update emotional weather
+            # a proactive check-in that chose silence leaves no footer either —
+            # the whole turn stays invisible. Still account for its cost.
+            if self._proactive_silent:
+                self._proactive_silent = False
+                self.mgr.add_cost(msg.total_cost_usd or 0.0)
+                await self._drain()
+                return
             self._react("😱" if msg.is_error else "👍")   # done
             dur = time.monotonic() - self.turn_started
             today, budget_alert = self.mgr.add_cost(msg.total_cost_usd or 0.0)

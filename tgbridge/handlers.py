@@ -317,6 +317,18 @@ async def cmd_bind(update: Update, ctx):
         f"🔗 this topic now talks to agent {name} (fresh session on next message)")
 
 
+async def cmd_proactive(update: Update, ctx):
+    from .config import (PROACTIVE_IDLE_HOURS, PROACTIVE_QUIET_END,
+                         PROACTIVE_QUIET_START)
+    s, val, note = await _toggle(update, ctx, "proactive",
+                                 "💭 proactive check-ins ON", "proactive off")
+    if val:
+        note += (f"\nAfter ~{PROACTIVE_IDLE_HOURS:g}h idle I'll skim our chat "
+                 f"and nudge you if something's open — staying quiet "
+                 f"{PROACTIVE_QUIET_START:02d}:00–{PROACTIVE_QUIET_END:02d}:00.")
+    await update.message.reply_text(note)
+
+
 async def cmd_soul(update: Update, ctx):
     """View or edit an agent's character sheet (the structured persona)."""
     from .soul import PRESETS
