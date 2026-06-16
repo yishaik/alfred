@@ -340,6 +340,33 @@ async def test_collect():
     check("collect restores mute state", s.outbox.muted is False)
 
 
+def test_todos():
+    from tgbridge.todos import TodoList
+
+    t = TodoList()
+    check("empty board message", "no tasks" in t.render())
+    a = t.add("buy milk", now=1)
+    b = t.add("write report", now=2)
+    check("ids increment", a.id == 1 and b.id == 2)
+    check("empty add ignored", t.add("  ") is None and len(t.items) == 2)
+
+    t.set_status("#2", "doing")
+    t.set_status(1, "done")
+    board = t.render()
+    check("board groups by column", "🔄 Doing" in board and "✅ Done" in board)
+    check("done item struck through", "~buy milk~" in board)
+    check("bad status rejected", t.set_status(1, "nope") is None)
+    check("missing id is None", t.set_status(99, "done") is None)
+
+    check("clear removes done only", t.clear_done() == 1 and len(t.items) == 1)
+
+    # persistence roundtrip preserves ids/seq so new adds don't collide
+    t.add("third", now=3)
+    back = TodoList.from_dict(t.to_dict())
+    check("todos roundtrip seq", back.seq == t.seq)
+    check("todos roundtrip items", len(back.items) == len(t.items))
+
+
 def test_workdir_safety():
     from tgbridge.config import is_dangerous_workdir
     check("blocks bare drive root", is_dangerous_workdir("C:\\"))
@@ -756,6 +783,7 @@ if __name__ == "__main__":
     test_ratelimit()
     test_imports()
     test_session_pure()
+    test_todos()
     test_workdir_safety()
     test_background_worker()
     test_mute()

@@ -20,12 +20,13 @@ from .config import (AGENTS_FILE, BACKUP_DIR, CHAT_ID, COSTS_FILE, DIGEST_TIME,
                      MONTHLY_BUDGET_USD, PAIR_MSGS_PER_5MIN,
                      PROACTIVE_IDLE_HOURS, PROACTIVE_QUIET_END,
                      PROACTIVE_QUIET_START, ROOT, SESSIONS_FILE, STATE_DIR,
-                     TOPICS_FILE, WATCH_MINUTES, WATCHERS_FILE, load_json,
-                     save_json, system_drive_free_gb)
+                     TODOS_FILE, TOPICS_FILE, WATCH_MINUTES, WATCHERS_FILE,
+                     load_json, save_json, system_drive_free_gb)
 from .digest import build_digest
 from .dream import dream_brief
 from .escalate import CRASH_WINDOW_S, assess
 from .memory import Memory
+from .todos import TodoList
 from .watchers import Watcher, compute_state, watch_prompt
 from .ratelimit import PairLimiter
 from .session import AgentConfig, AgentSession, TurnSource
@@ -63,6 +64,7 @@ class AgentManager:
             name: Memory.from_list(items) for name, items in raw_mem.items()}
         self.watchers: list[Watcher] = [
             Watcher.from_dict(d) for d in load_json(WATCHERS_FILE, [])]
+        self.todos: TodoList = TodoList.from_dict(load_json(TODOS_FILE, {}))
         self.sessions: dict[str, AgentSession] = {}
         self.by_sid: dict[int, AgentSession] = {}
         self._sid_seq = 0
@@ -119,6 +121,9 @@ class AgentManager:
 
     def save_watchers(self):
         save_json(WATCHERS_FILE, [w.to_dict() for w in self.watchers])
+
+    def save_todos(self):
+        save_json(TODOS_FILE, self.todos.to_dict())
 
     def decay_memories(self) -> int:
         """Daily maintenance: fade unengaged memory across all agents. Persists

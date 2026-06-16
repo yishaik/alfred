@@ -807,6 +807,52 @@ async def cmd_digest(update: Update, ctx):
     await update.message.reply_text(build_digest(mgr(ctx)))
 
 
+async def cmd_todo(update: Update, ctx):
+    """A small Kanban to-do list (#20): add / move / remove / clear."""
+    m = mgr(ctx)
+    args = ctx.args or []
+    sub = args[0].lower() if args else ""
+    todos = m.todos
+
+    if not sub:
+        await update.message.reply_text(
+            todos.render() + "\n\n/todo add <text> · /todo done|doing <#> · "
+            "/todo rm <#> · /todo clear")
+        return
+    if sub == "add":
+        t = todos.add(" ".join(args[1:]))
+        if not t:
+            await update.message.reply_text("usage: /todo add <text>")
+            return
+        m.save_todos()
+        await update.message.reply_text(f"📋 #{t.id} added.\n\n{todos.render()}")
+        return
+    if sub in ("done", "doing", "todo") and len(args) > 1:
+        t = todos.set_status(args[1], sub)
+        if not t:
+            await update.message.reply_text(f"🤔 no task #{args[1]}")
+            return
+        m.save_todos()
+        await update.message.reply_text(f"✅ #{t.id} → {sub}\n\n{todos.render()}")
+        return
+    if sub in ("rm", "remove", "del") and len(args) > 1:
+        t = todos.remove(args[1])
+        if not t:
+            await update.message.reply_text(f"🤔 no task #{args[1]}")
+            return
+        m.save_todos()
+        await update.message.reply_text(f"🗑 removed #{t.id}\n\n{todos.render()}")
+        return
+    if sub == "clear":
+        n = todos.clear_done()
+        m.save_todos()
+        await update.message.reply_text(f"🧹 cleared {n} done task(s)\n\n{todos.render()}")
+        return
+    await update.message.reply_text(
+        "usage: /todo · /todo add <text> · /todo done|doing <#> · "
+        "/todo rm <#> · /todo clear")
+
+
 async def cmd_costs(update: Update, ctx):
     """Cost totals plus today's tool-activity breakdown by category (#27)."""
     from datetime import date

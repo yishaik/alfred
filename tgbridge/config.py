@@ -171,6 +171,7 @@ COSTS_FILE = STATE_DIR / "costs.json"
 TOPICS_FILE = STATE_DIR / "topics.json"
 MEMORY_FILE = STATE_DIR / "memory.json"          # {agent: [memory items]}
 WATCHERS_FILE = STATE_DIR / "watchers.json"      # passive-watcher targets
+TODOS_FILE = STATE_DIR / "todos.json"            # the /todo Kanban list
 AUDIT_FILE = STATE_DIR / "audit.jsonl"
 APP_LOG_FILE = STATE_DIR / "bridge-app.log"
 BACKUP_DIR = STATE_DIR / "backup"
