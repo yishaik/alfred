@@ -600,6 +600,59 @@ async def cmd_logs(update: Update, ctx):
         ("🧾 recent warnings/errors:\n" + "\n".join(bad))[:4000])
 
 
+async def cmd_watch(update: Update, ctx):
+    """Watch a file/folder/git-repo for changes (issue #6)."""
+    from .watchers import Watcher, compute_state, detect_kind
+    m = mgr(ctx)
+    target = " ".join(ctx.args or []).strip().strip('"')
+    if not target:
+        if not m.watchers:
+            await update.message.reply_text(
+                "👁 nothing watched. /watch <path> — a file, folder, or git "
+                "repo; I'll ping you (in character) when it changes.")
+            return
+        lines = ["👁 watching:"]
+        for i, w in enumerate(m.watchers, 1):
+            lines.append(f"{i}. [{w.kind}] {w.path}")
+        lines.append("\n/unwatch <number|path> to stop.")
+        await update.message.reply_text("\n".join(lines))
+        return
+    kind = detect_kind(target)
+    if kind is None:
+        await update.message.reply_text(f"⚠️ can't find “{target}” on disk")
+        return
+    if any(w.path == target for w in m.watchers):
+        await update.message.reply_text("already watching that")
+        return
+    w = Watcher(path=target, kind=kind, label=target.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1])
+    w.last_state = await asyncio.to_thread(compute_state, w.path, w.kind) or ""
+    m.watchers.append(w)
+    m.save_watchers()
+    await update.message.reply_text(
+        f"👁 watching {kind}: {target}\nI'll let you know when it changes.")
+
+
+async def cmd_unwatch(update: Update, ctx):
+    m = mgr(ctx)
+    ref = " ".join(ctx.args or []).strip()
+    if not ref:
+        await update.message.reply_text("usage: /unwatch <number|path>")
+        return
+    target = None
+    if ref.lstrip("#").isdigit():
+        i = int(ref.lstrip("#")) - 1
+        if 0 <= i < len(m.watchers):
+            target = m.watchers[i]
+    else:
+        target = next((w for w in m.watchers if ref in w.path), None)
+    if not target:
+        await update.message.reply_text(f"🤔 no watcher matched “{ref}”")
+        return
+    m.watchers.remove(target)
+    m.save_watchers()
+    await update.message.reply_text(f"🚫 stopped watching {target.path}")
+
+
 async def cmd_digest(update: Update, ctx):
     """On-demand 'what happened today' summary (issue #7)."""
     from .digest import build_digest

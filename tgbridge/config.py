@@ -129,6 +129,7 @@ HEALTH_TIME = os.environ.get("BRIDGE_HEALTH_TIME", "09:00")      # "" disables t
 DIGEST_TIME = os.environ.get("BRIDGE_DIGEST_TIME", "")           # "" = off; e.g. "20:00" for an evening recap
 ESCALATE_MINUTES = float(os.environ.get("BRIDGE_ESCALATE_MINUTES", "10"))  # 0 = off
 DREAM_TIME = os.environ.get("BRIDGE_DREAM_TIME", "")             # "" = off; early-morning brief, e.g. "06:00"
+WATCH_MINUTES = float(os.environ.get("BRIDGE_WATCH_MINUTES", "5"))  # passive-watcher poll interval; 0 = off
 MONTHLY_BUDGET_USD = float(os.environ.get("BRIDGE_MONTHLY_BUDGET_USD", "0"))  # 0 = off
 CONTEXT_WARN_PCT = float(os.environ.get("BRIDGE_CONTEXT_WARN_PCT", "70"))
 SHOW_DIFFS = os.environ.get("BRIDGE_SHOW_DIFFS", "1") not in ("0", "false", "off")
@@ -169,6 +170,7 @@ JOBS_FILE = STATE_DIR / "jobs.json"
 COSTS_FILE = STATE_DIR / "costs.json"
 TOPICS_FILE = STATE_DIR / "topics.json"
 MEMORY_FILE = STATE_DIR / "memory.json"          # {agent: [memory items]}
+WATCHERS_FILE = STATE_DIR / "watchers.json"      # passive-watcher targets
 AUDIT_FILE = STATE_DIR / "audit.jsonl"
 APP_LOG_FILE = STATE_DIR / "bridge-app.log"
 BACKUP_DIR = STATE_DIR / "backup"
