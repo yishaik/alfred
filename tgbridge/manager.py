@@ -20,11 +20,13 @@ from .config import (AGENTS_FILE, BACKUP_DIR, CHAT_ID, COSTS_FILE, DIGEST_TIME,
                      MONTHLY_BUDGET_USD, PAIR_MSGS_PER_5MIN,
                      PROACTIVE_IDLE_HOURS, PROACTIVE_QUIET_END,
                      PROACTIVE_QUIET_START, ROOT, SESSIONS_FILE, STATE_DIR,
-                     TOPICS_FILE, load_json, save_json, system_drive_free_gb)
+                     TOPICS_FILE, WATCH_MINUTES, WATCHERS_FILE, load_json,
+                     save_json, system_drive_free_gb)
 from .digest import build_digest
 from .dream import dream_brief
 from .escalate import CRASH_WINDOW_S, assess
 from .memory import Memory
+from .watchers import Watcher, compute_state, watch_prompt
 from .ratelimit import PairLimiter
 from .session import AgentConfig, AgentSession, TurnSource
 
@@ -59,6 +61,8 @@ class AgentManager:
         raw_mem = load_json(MEMORY_FILE, {})
         self.memories: dict[str, Memory] = {
             name: Memory.from_list(items) for name, items in raw_mem.items()}
+        self.watchers: list[Watcher] = [
+            Watcher.from_dict(d) for d in load_json(WATCHERS_FILE, [])]
         self.sessions: dict[str, AgentSession] = {}
         self.by_sid: dict[int, AgentSession] = {}
         self._sid_seq = 0
@@ -73,6 +77,7 @@ class AgentManager:
         self._digest_task: asyncio.Task | None = None
         self._escalate_task: asyncio.Task | None = None
         self._dream_task: asyncio.Task | None = None
+        self._watch_task: asyncio.Task | None = None
         self._crash_times: list[float] = []     # monotonic stamps of recent crashes
         self._active_alerts: set[str] = set()    # escalation keys currently tripped
 
@@ -111,6 +116,9 @@ class AgentManager:
         save_json(MEMORY_FILE, {name: mem.to_list()
                                 for name, mem in self.memories.items()
                                 if mem.items})
+
+    def save_watchers(self):
+        save_json(WATCHERS_FILE, [w.to_dict() for w in self.watchers])
 
     def decay_memories(self) -> int:
         """Daily maintenance: fade unengaged memory across all agents. Persists
@@ -235,6 +243,8 @@ class AgentManager:
             self._escalate_task.cancel()
         if self._dream_task:
             self._dream_task.cancel()
+        if self._watch_task:
+            self._watch_task.cancel()
         for s in list(self.sessions.values()):
             await s.stop()
             await s.outbox.stop()
@@ -435,6 +445,38 @@ class AgentManager:
             except Exception:
                 log.exception("dream pass failed")
                 await asyncio.sleep(3600)
+
+    # -- passive watchers (issue #6) -----------------------------------------#
+    def start_watch_loop(self):
+        if WATCH_MINUTES > 0:
+            self._watch_task = asyncio.create_task(self._watch_loop())
+
+    async def _watch_loop(self):
+        while True:
+            try:
+                await asyncio.sleep(WATCH_MINUTES * 60)
+                if not self.watchers:
+                    continue
+                dirty = False
+                for w in self.watchers:
+                    state = await asyncio.to_thread(compute_state, w.path, w.kind)
+                    if state is None or state == w.last_state:
+                        continue
+                    # fire only once we've established a baseline (not on first
+                    # sight), then notify the active agent via the proactive
+                    # channel so it can react or stay silent
+                    if w.last_state:
+                        sess = await self.session_for_agent(self.active)
+                        await sess.feed(watch_prompt(w.label or w.path, w.kind),
+                                        TurnSource(kind="proactive"))
+                    w.last_state = state
+                    dirty = True
+                if dirty:
+                    self.save_watchers()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                log.exception("watch loop tick failed")
 
     # -- markers / bot-to-bot -------------------------------------------------#
     async def handle_markers(self, session: AgentSession, parsed):

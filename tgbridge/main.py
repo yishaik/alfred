@@ -39,6 +39,7 @@ BOT_COMMANDS = [
     ("tts", "toggle voice replies"),
     ("voice", "pick the TTS voice"),
     ("digest", "what I did today"),
+    ("watch", "watch a path/repo for changes"),
     ("audit", "recent tool calls"),
     ("logs", "recent warnings/errors"),
     ("restart", "restart Claude (resumes)"),
@@ -75,6 +76,7 @@ async def post_init(app):
     m.start_digest_loop()
     m.start_escalate_loop()
     m.start_dream_loop()
+    m.start_watch_loop()
     try:
         await app.bot.set_my_commands(BOT_COMMANDS)
     except Exception:
@@ -193,6 +195,8 @@ def main():
         "fork": handlers.cmd_fork,
         "find": handlers.cmd_find,
         "digest": handlers.cmd_digest,
+        "watch": handlers.cmd_watch,
+        "unwatch": handlers.cmd_unwatch,
         "audit": handlers.cmd_audit,
         "logs": handlers.cmd_logs,
     }

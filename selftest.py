@@ -307,6 +307,36 @@ def test_memory():
           any(it.kind == "pinned" for it in back.items))
 
 
+def test_watchers(tmp_dir):
+    from tgbridge.watchers import (Watcher, compute_state, detect_kind,
+                                   dir_signature)
+
+    # dir_signature is order-independent but change-sensitive
+    a = dir_signature([("a.py", 100, 10), ("b.py", 200, 20)])
+    b = dir_signature([("b.py", 200, 20), ("a.py", 100, 10)])
+    check("dir signature order-independent", a == b)
+    check("dir signature change-sensitive",
+          a != dir_signature([("a.py", 100, 11), ("b.py", 200, 20)]))
+
+    # detect_kind classifies real targets and rejects missing ones
+    f = tmp_dir / "note.txt"
+    f.write_text("hi", encoding="utf-8")
+    check("detect file", detect_kind(str(f)) == "file")
+    check("detect dir", detect_kind(str(tmp_dir)) == "dir")
+    check("detect missing", detect_kind(str(tmp_dir / "nope")) is None)
+
+    # a file's fingerprint moves when its contents change
+    s1 = compute_state(str(f), "file")
+    f.write_text("hello world, longer now", encoding="utf-8")
+    s2 = compute_state(str(f), "file")
+    check("file state changes on edit", s1 != s2 and s1 and s2)
+
+    # Watcher roundtrips
+    w = Watcher(path=str(f), kind="file", label="note", last_state=s2)
+    check("watcher roundtrip",
+          Watcher.from_dict(w.to_dict()).last_state == s2)
+
+
 def test_dream_agenda():
     from tgbridge.dream import build_agenda
 
@@ -634,6 +664,8 @@ if __name__ == "__main__":
     from pathlib import Path
     with tempfile.TemporaryDirectory() as _td:
         test_audit_rotation(Path(_td))
+    with tempfile.TemporaryDirectory() as _td:
+        test_watchers(Path(_td))
     test_job_skey()
     test_job_retry_on_failure()
     test_metrics()
