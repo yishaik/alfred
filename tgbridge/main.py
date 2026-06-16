@@ -94,9 +94,9 @@ async def post_init(app):
     try:
         await app.bot.send_message(
             CHAT_ID,
-            f"🤖 Claude bridge v2 online · agent {m.active} · "
+            f"🎩 Alfred online · agent {m.active} · "
             f"cwd {s.cfg.workdir} · model {s.model or 'default'}\n"
-            "Type to chat, /panel for controls.",
+            "Type to chat · /panel for controls · ✨ Features for the rest.",
             reply_markup=handlers.panel_kb(s))
     except Exception:
         log.exception("online message failed")

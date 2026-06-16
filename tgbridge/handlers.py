@@ -160,17 +160,22 @@ def _status_text(m: AgentManager) -> str:
 async def cmd_start(update: Update, ctx):
     s = await _session(update, ctx)
     await update.message.reply_text(
-        "🤖 𝗖𝗹𝗮𝘂𝗱𝗲 𝗕𝗿𝗶𝗱𝗴𝗲 𝗼𝗻𝗹𝗶𝗻𝗲\n"
+        "🎩 𝗔𝗹𝗳𝗿𝗲𝗱 𝗼𝗻𝗹𝗶𝗻𝗲\n"
         f"{SEP}\n"
         f"⚡ agent: {s.cfg.name}\n"
         f"🧠 model: {_pretty_model(s.model) or 'default'}\n"
         f"📂 cwd: {s.cfg.workdir}\n"
         f"{SEP}\n"
-        "Type anything to talk to Claude; /slashcommands pass straight through.\n\n"
-        "🎛 Bridge: /panel /status /agents /jobs /remind /sessions /fork\n"
-        "          /restart /interrupt /kill\n"
-        "👤 Per-agent: /auto /secretary /tts /cwd /bind /newagent /delagent\n\n"
-        "💡 React 👎 to interrupt · edit your last message to correct it.",
+        "Type to talk; /slashcommands pass to Claude. "
+        "Tap /panel → ✨ Features for everything.\n\n"
+        "🎛 Control: /panel /status /restart /interrupt /mute\n"
+        "🧠 Memory: /remember /memory /forget\n"
+        "🎭 Self: /soul /proactive /voice\n"
+        "🌊 Watch: /watch /digest /costs /peers\n"
+        "🧵 Parallel: /bg /branch /merge /agents\n"
+        "⏰ Time: /remind /jobs\n"
+        "👤 Agent: /auto /secretary /cwd /bind /fork /sessions\n\n"
+        "💡 React 👎 to interrupt · edit a message to correct it.",
         reply_markup=panel_kb(s))
 
 
