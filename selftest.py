@@ -367,6 +367,45 @@ def test_todos():
     check("todos roundtrip items", len(back.items) == len(t.items))
 
 
+def test_expenses():
+    from tgbridge.expenses import Ledger, parse_amount_note
+
+    amt, cat, note = parse_amount_note("200 #food lunch with X")
+    check("parse amount", amt == 200.0)
+    check("parse category", cat == "food")
+    check("parse note", note == "lunch with X")
+    check("parse bad amount", parse_amount_note("hello")[0] is None)
+    check("parse currency sign", parse_amount_note("$1,250 rent")[0] == 1250.0)
+
+    led = Ledger()
+    led.add(200, "food", "lunch", month="2026-06")
+    led.add(50, "food", "snack", month="2026-06")
+    led.add(1000, "rent", "june", month="2026-06")
+    led.add(99, "food", "old", month="2026-05")
+    check("month total scoped", led.total("2026-06") == 1250.0)
+    cats = led.by_category("2026-06")
+    check("category sums", cats["food"] == 250.0 and cats["rent"] == 1000.0)
+    check("render shows month total", "$1,250.00" in led.render("2026-06"))
+    back = Ledger.from_dict(led.to_dict())
+    check("expenses roundtrip", back.total("2026-06") == 1250.0)
+
+
+def test_contacts():
+    from tgbridge.contacts import ContactBook
+
+    book = ContactBook()
+    c = book.add("Dana", "plumber, fixed boiler")
+    book.add("Avi", "accountant")
+    check("contact ids", c.id == 1)
+    check("empty name ignored", book.add("  ") is None and len(book.items) == 2)
+    check("find by name", len(book.find("dana")) == 1)
+    check("find by info", len(book.find("accountant")) == 1)
+    check("find miss", book.find("zzz") == [])
+    check("remove", book.remove(1) is not None and len(book.items) == 1)
+    back = ContactBook.from_dict(book.to_dict())
+    check("contacts roundtrip", len(back.items) == 1 and back.seq == book.seq)
+
+
 def test_workdir_safety():
     from tgbridge.config import is_dangerous_workdir
     check("blocks bare drive root", is_dangerous_workdir("C:\\"))
@@ -784,6 +823,8 @@ if __name__ == "__main__":
     test_imports()
     test_session_pure()
     test_todos()
+    test_expenses()
+    test_contacts()
     test_workdir_safety()
     test_background_worker()
     test_mute()

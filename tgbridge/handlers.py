@@ -853,6 +853,80 @@ async def cmd_todo(update: Update, ctx):
         "/todo rm <#> · /todo clear")
 
 
+async def cmd_expense(update: Update, ctx):
+    """Pocket expense tracker (#24)."""
+    from .expenses import parse_amount_note
+    m = mgr(ctx)
+    args = ctx.args or []
+    sub = args[0].lower() if args else ""
+    led = m.expenses
+    if not sub:
+        await update.message.reply_text(
+            led.render() + "\n\n/expense add <amount> [#category] [note] · "
+            "/expense rm <#>")
+        return
+    if sub == "add":
+        amount, category, note = parse_amount_note(" ".join(args[1:]))
+        if amount is None:
+            await update.message.reply_text(
+                "usage: /expense add <amount> [#category] [note]\n"
+                "e.g. /expense add 200 #food lunch")
+            return
+        e = led.add(amount, category, note)
+        m.save_expenses()
+        await update.message.reply_text(f"💸 logged #{e.id}.\n\n{led.render()}")
+        return
+    if sub in ("rm", "remove", "del") and len(args) > 1:
+        e = led.remove(args[1])
+        if not e:
+            await update.message.reply_text(f"🤔 no expense #{args[1]}")
+            return
+        m.save_expenses()
+        await update.message.reply_text(f"🗑 removed #{e.id}\n\n{led.render()}")
+        return
+    await update.message.reply_text(
+        "usage: /expense · /expense add <amount> [#category] [note] · "
+        "/expense rm <#>")
+
+
+async def cmd_contact(update: Update, ctx):
+    """Contact book (#25)."""
+    m = mgr(ctx)
+    args = ctx.args or []
+    sub = args[0].lower() if args else ""
+    book = m.contacts
+    if not sub:
+        await update.message.reply_text(
+            book.render() + "\n\n/contact add <name> | <details> · "
+            "/contact find <q> · /contact rm <#>")
+        return
+    if sub == "add":
+        body = " ".join(args[1:])
+        name, _, info = body.partition("|")
+        c = book.add(name.strip(), info.strip())
+        if not c:
+            await update.message.reply_text(
+                "usage: /contact add <name> | <details>")
+            return
+        m.save_contacts()
+        await update.message.reply_text(f"📇 added {c.name} (#{c.id}).")
+        return
+    if sub == "find" and len(args) > 1:
+        await update.message.reply_text(book.render(book.find(" ".join(args[1:]))))
+        return
+    if sub in ("rm", "remove", "del") and len(args) > 1:
+        c = book.remove(args[1])
+        if not c:
+            await update.message.reply_text(f"🤔 no contact #{args[1]}")
+            return
+        m.save_contacts()
+        await update.message.reply_text(f"🗑 removed {c.name}")
+        return
+    await update.message.reply_text(
+        "usage: /contact · /contact add <name> | <details> · "
+        "/contact find <q> · /contact rm <#>")
+
+
 async def cmd_costs(update: Update, ctx):
     """Cost totals plus today's tool-activity breakdown by category (#27)."""
     from datetime import date
