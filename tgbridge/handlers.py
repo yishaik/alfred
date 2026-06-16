@@ -53,9 +53,27 @@ def panel_kb(s) -> InlineKeyboardMarkup:
          InlineKeyboardButton("⏰ Jobs", callback_data="menu:jobs")],
         [InlineKeyboardButton(auto_label, callback_data="act:auto"),
          InlineKeyboardButton(sec_label, callback_data="act:secretary")],
-        [InlineKeyboardButton("📈 Usage", callback_data="send:/usage"),
-         InlineKeyboardButton("📋 Commands", callback_data="menu:cmds"),
+        [InlineKeyboardButton("✨ Features", callback_data="menu:features"),
+         InlineKeyboardButton("📈 Usage", callback_data="send:/usage"),
          InlineKeyboardButton("📂 Status", callback_data="act:status")],
+    ])
+
+
+def features_kb(s) -> InlineKeyboardMarkup:
+    """Second tier: the capabilities that don't fit the compact main panel —
+    each wired to a real action via the feat: callback."""
+    prox = "💭 Proactive ●" if s.cfg.proactive else "💭 Proactive"
+    mute = "🔊 Unmute" if s.outbox.muted else "🔇 Mute"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎭 Soul", callback_data="feat:soul"),
+         InlineKeyboardButton("🧠 Memory", callback_data="feat:memory")],
+        [InlineKeyboardButton("👁 Watchers", callback_data="feat:watch"),
+         InlineKeyboardButton("📓 Digest", callback_data="feat:digest")],
+        [InlineKeyboardButton(prox, callback_data="feat:proactive"),
+         InlineKeyboardButton(mute, callback_data="feat:mute")],
+        [InlineKeyboardButton("🔊 Voice", callback_data="feat:voice"),
+         InlineKeyboardButton("📋 Commands", callback_data="menu:cmds")],
+        [InlineKeyboardButton("⬅ Back", callback_data="menu:back")],
     ])
 
 
@@ -1024,6 +1042,10 @@ async def on_callback(update: Update, ctx):
         await _edit(q, "Pick a model (applies live):", model_kb(s.cfg.model))
     elif data == "menu:cmds":
         await _edit(q, "Send a command to Claude:", cmds_kb(s))
+    elif data == "menu:features":
+        await _edit(q, "✨ Features:", features_kb(s))
+    elif data.startswith("feat:"):
+        await _feature_cb(q, s, m, data[5:])
     elif data == "menu:agents":
         await _edit(q, "Agents (● = active):", agents_kb(m))
     elif data == "menu:jobs":
@@ -1089,6 +1111,40 @@ async def on_callback(update: Update, ctx):
             s = await m.session_for_route(int(chat_str), tid_cb)
             if s:
                 await _handle_page_cb(q, s, int(pid_str), int(pn_str))
+
+
+async def _feature_cb(q, s, m, name: str):
+    """The ✨ Features submenu actions. Display features post their content as a
+    fresh message (keeps the menu up); toggles update the menu in place."""
+    if name == "soul":
+        s.outbox.emit(s.cfg.soul.render_card()
+                      + f"\n\ncurrent mood: {s.mood.label()}")
+    elif name == "memory":
+        s.outbox.emit(m.memory_for(s.cfg.name).render_list())
+    elif name == "watch":
+        if m.watchers:
+            s.outbox.emit("\n".join(["👁 watching:"]
+                          + [f"• [{w.kind}] {w.path}" for w in m.watchers]))
+        else:
+            s.outbox.emit("👁 nothing watched yet. /watch <path> to add one.")
+    elif name == "digest":
+        from .digest import build_digest
+        s.outbox.emit(build_digest(m))
+    elif name == "proactive":
+        s.cfg.proactive = not s.cfg.proactive
+        m.save_agents()
+        await _edit(q, "✨ Features:", features_kb(s))
+    elif name == "mute":
+        s.outbox.muted = not s.outbox.muted
+        await _edit(q, "✨ Features:", features_kb(s))
+    elif name == "voice":
+        backend, names = voice.list_voices()
+        if not backend:
+            s.outbox.emit("🔇 no TTS backend — set OPENAI_API_KEY or "
+                          "`pip install edge-tts`")
+        else:
+            await _edit(q, f"🔊 pick a voice ({backend}):",
+                        voice_kb(s.cfg.voice, names))
 
 
 async def _session_cb(q, s, tag: str, rest: list[str]):

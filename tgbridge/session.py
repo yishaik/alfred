@@ -677,23 +677,29 @@ class AgentSession:
                 return
             self._react("😱" if msg.is_error else "👍")   # done
             dur = time.monotonic() - self.turn_started
-            today, budget_alert = self.mgr.add_cost(msg.total_cost_usd or 0.0)
+            cost = msg.total_cost_usd or 0.0
+            today, budget_alert = self.mgr.add_cost(cost)
+            # Lean by default: a routine turn shows just time + cost. The full
+            # breakdown (model, tokens, day total) only appears on a "notable"
+            # turn — pricey or long — where it actually earns its space.
             foot = f"✅ {fmt_duration(dur)}"
-            if self.model:
-                foot += f" · {_pretty_model(self.model)}"
-            if msg.total_cost_usd:
-                foot += (f" · {_cost_emoji(msg.total_cost_usd)} "
-                         f"${msg.total_cost_usd:.4f} · today ${today:.2f}")
-            u = msg.usage or {}
-            t_in = (u.get("input_tokens", 0)
-                    + u.get("cache_creation_input_tokens", 0)
-                    + u.get("cache_read_input_tokens", 0))
-            t_out = u.get("output_tokens", 0)
-            if t_in or t_out:
-                foot += f" · 📊 {_tok(t_in)}→{_tok(t_out)} tok"
-                cached = u.get("cache_read_input_tokens", 0)
-                if cached:
-                    foot += f" ({_tok(cached)} cached)"
+            if cost:
+                foot += f" · {_cost_emoji(cost)} ${cost:.4f}"
+            notable = cost >= 0.10 or dur >= 60
+            if notable:
+                if self.model:
+                    foot += f" · {_pretty_model(self.model)}"
+                u = msg.usage or {}
+                t_in = (u.get("input_tokens", 0)
+                        + u.get("cache_creation_input_tokens", 0)
+                        + u.get("cache_read_input_tokens", 0))
+                t_out = u.get("output_tokens", 0)
+                if t_in or t_out:
+                    foot += f" · 📊 {_tok(t_in)}→{_tok(t_out)} tok"
+                    cached = u.get("cache_read_input_tokens", 0)
+                    if cached:
+                        foot += f" ({_tok(cached)} cached)"
+                foot += f" · today ${today:.2f}"
             if msg.subtype and msg.subtype != "success":
                 foot += f" · {msg.subtype}"
             if msg.is_error:
