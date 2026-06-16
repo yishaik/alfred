@@ -307,6 +307,39 @@ def test_memory():
           any(it.kind == "pinned" for it in back.items))
 
 
+async def test_collect():
+    """collect() (the /branch + /merge engine) runs a muted turn and returns
+    its gathered assistant text, then cleans up its capture state."""
+    from tgbridge.session import AgentConfig, AgentSession
+
+    class FakeBot:
+        pass
+
+    class FakeMgr:
+        def __init__(self):
+            self.bot = FakeBot()
+            self.session_ids = {}
+        def add_cost(self, c):
+            return (0.0, None)
+
+    s = AgentSession(FakeMgr(), AgentConfig(name="w"), "w@p", 1, 1, None)
+    s.busy = False
+
+    async def fake_feed(text, *a, **k):
+        # stand in for a real turn: gather text and resolve the capture future
+        s._capture["texts"].append("worker says hi")
+        assert s.outbox.muted, "collect must mute the turn"
+        fut = s._capture["future"]
+        if not fut.done():
+            fut.set_result("\n".join(s._capture["texts"]).strip())
+    s.feed = fake_feed
+
+    out = await s.collect("do a thing")
+    check("collect returns gathered text", out == "worker says hi")
+    check("collect clears capture", s._capture is None)
+    check("collect restores mute state", s.outbox.muted is False)
+
+
 def test_background_worker():
     # /bg spins up a worker agent inheriting the active agent's cwd + model,
     # and must auto-approve so a background task never stalls on a permission tap
@@ -716,6 +749,7 @@ if __name__ == "__main__":
     test_voice_picker()
     test_singleton_lock()
     asyncio.run(test_question_serialization())
+    asyncio.run(test_collect())
     asyncio.run(test_peer_protocol())
     print("-" * 40)
     print("ALL OK" if FAIL == 0 else f"{FAIL} FAILURES")

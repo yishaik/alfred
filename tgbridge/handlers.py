@@ -189,10 +189,76 @@ async def cmd_stop(update: Update, ctx):
     await (await _session(update, ctx)).interrupt()
 
 
+async def _ensure_worker(m, name: str):
+    """Get-or-create a reusable worker agent inheriting the active agent's
+    cwd + model (used by /bg, /branch, /merge)."""
+    from .session import AgentConfig
+    if name not in m.agents:
+        active = m.agents.get(m.active) or m.agents["main"]
+        m.agents[name] = AgentConfig(name=name, workdir=active.workdir,
+                                     model=active.model)
+        m.save_agents()
+    return await m.session_for_agent(name)
+
+
+async def cmd_branch(update: Update, ctx):
+    """Run a prompt two ways in parallel and show both for comparison (#16)."""
+    s = await _session(update, ctx)
+    m = mgr(ctx)
+    prompt = " ".join(ctx.args or []).strip()
+    if not prompt:
+        await update.message.reply_text(
+            "usage: /branch <prompt> — I'll run it two ways in parallel "
+            "(thorough vs pragmatic) and show both so you can compare.")
+        return
+    wa = await _ensure_worker(m, "alt1")
+    wb = await _ensure_worker(m, "alt2")
+    await update.message.reply_text("🌿 branching — two takes running in parallel…")
+    ra, rb = await asyncio.gather(
+        wa.collect(f"{prompt}\n\n[Take A — be thorough and rigorous; weigh "
+                   "edge cases and trade-offs.]"),
+        wb.collect(f"{prompt}\n\n[Take B — be fast and pragmatic; the simplest "
+                   "thing that works.]"),
+        return_exceptions=True)
+
+    def fmt(r):
+        return r if isinstance(r, str) and r else f"(no result: {r})"
+    s.outbox.emit(f"🌿 **Two takes on:** {prompt[:120]}\n\n"
+                  f"**━━ A · thorough ━━**\n{fmt(ra)}\n\n"
+                  f"**━━ B · pragmatic ━━**\n{fmt(rb)}")
+
+
+async def cmd_merge(update: Update, ctx):
+    """Run a prompt on two agents, then synthesise one combined answer (#17)."""
+    s = await _session(update, ctx)
+    m = mgr(ctx)
+    prompt = " ".join(ctx.args or []).strip()
+    if not prompt:
+        await update.message.reply_text(
+            "usage: /merge <prompt> — two agents answer from different angles, "
+            "then a third merges them into one better answer.")
+        return
+    wa = await _ensure_worker(m, "alt1")
+    wb = await _ensure_worker(m, "alt2")
+    await update.message.reply_text("🔀 gathering two takes, then merging…")
+    ra, rb = await asyncio.gather(
+        wa.collect(f"{prompt}\n\n[Answer from a thorough, risk-aware angle.]"),
+        wb.collect(f"{prompt}\n\n[Answer from a fast, pragmatic angle.]"),
+        return_exceptions=True)
+    ra = ra if isinstance(ra, str) else ""
+    rb = rb if isinstance(rb, str) else ""
+    synth = await _ensure_worker(m, "synth")
+    combined = await synth.collect(
+        f"Two independent takes were produced on this request:\n\n«{prompt}»\n\n"
+        f"--- TAKE A ---\n{ra}\n\n--- TAKE B ---\n{rb}\n\n"
+        "Merge them into ONE better answer: reconcile any differences, keep the "
+        "strongest of each, drop redundancy. Reply with only the merged answer.")
+    s.outbox.emit(f"🔀 **Merged answer** ({prompt[:100]}):\n\n{combined}")
+
+
 async def cmd_bg(update: Update, ctx):
     """Run a task in the background on a dedicated worker agent, keeping the
     main conversation free; the worker pings here when it's done (issue #18)."""
-    from .session import AgentConfig
     m = mgr(ctx)
     task = " ".join(ctx.args or []).strip()
     if not task:
@@ -202,12 +268,7 @@ async def cmd_bg(update: Update, ctx):
             "chat stays free.")
         return
     # a dedicated worker agent, inheriting the active agent's cwd + model
-    if "bg" not in m.agents:
-        active = m.agents.get(m.active) or m.agents["main"]
-        m.agents["bg"] = AgentConfig(name="bg", workdir=active.workdir,
-                                     model=active.model)
-        m.save_agents()
-    worker = await m.session_for_agent("bg")
+    worker = await _ensure_worker(m, "bg")
     note = ("🔧 background task started — I'll keep this chat free and ping "
             "when it's done."
             if not worker.busy else
