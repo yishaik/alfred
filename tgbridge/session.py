@@ -217,6 +217,9 @@ class AgentSession:
         self._last_rl_note = 0.0
         self._last_warn = 0.0
         self._turn_text_streamed = False
+        # capture mode (branch/merge, #16/#17): when set, a turn's assistant
+        # text is gathered and returned by collect() instead of just emitted.
+        self._capture: dict | None = None
         # proactive idle check-ins: stamp of last user activity, an "armed"
         # flag reset whenever the user speaks (one ping per idle stretch), and
         # a per-turn flag set when a check-in chose silence (suppress output).
@@ -407,6 +410,27 @@ class AgentSession:
         await self._send_turn(text, source)
         return True
 
+    async def collect(self, text: str, timeout: float = 300.0) -> str:
+        """Run ONE turn and return its final assistant text, with the normal
+        chat output suppressed. The engine behind /branch and /merge: fan a
+        prompt out to worker sessions and gather their answers. Raises
+        TimeoutError if the session can't free up or the turn overruns."""
+        deadline = time.monotonic() + timeout
+        while self.busy and time.monotonic() < deadline:
+            await asyncio.sleep(0.2)
+        if self.busy:
+            raise TimeoutError("worker stayed busy")
+        loop = asyncio.get_running_loop()
+        self._capture = {"texts": [], "future": loop.create_future()}
+        was_muted = self.outbox.muted
+        self.outbox.muted = True          # this turn's output stays internal
+        try:
+            await self.feed(text)
+            return await asyncio.wait_for(self._capture["future"], timeout)
+        finally:
+            self.outbox.muted = was_muted
+            self._capture = None
+
     async def _send_turn(self, text: str, source: TurnSource):
         if not self.connected:
             try:
@@ -581,6 +605,8 @@ class AgentSession:
                     tools.append((block.name, summ))
             full = "\n".join(t for t in texts if t)
             parsed = markers.parse(full)
+            if self._capture is not None and parsed.text:
+                self._capture["texts"].append(parsed.text)   # branch/merge gather
             # proactive check-in that chose silence: drop the whole turn quietly
             if self.turn_source.kind == "proactive":
                 from .proactive import declined
@@ -634,6 +660,14 @@ class AgentSession:
             self.busy = False
             self.backoff.reset()
             self.mood.note_result(bool(msg.is_error))   # update emotional weather
+            # capture mode (branch/merge): hand the gathered text to collect()
+            if self._capture is not None:
+                self.mgr.add_cost(msg.total_cost_usd or 0.0)
+                fut = self._capture["future"]
+                if not fut.done():
+                    fut.set_result("\n".join(self._capture["texts"]).strip())
+                await self._drain()
+                return
             # a proactive check-in that chose silence leaves no footer either —
             # the whole turn stays invisible. Still account for its cost.
             if self._proactive_silent:
