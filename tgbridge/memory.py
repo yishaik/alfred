@@ -28,6 +28,15 @@ KINDS = ("pinned", "note", "fact")
 MAX_INJECT_ITEMS = 30
 MAX_INJECT_CHARS = 2000
 
+# Decay (issue #11) — old, unengaged memory fades from the prompt without being
+# deleted. Pinned items are exempt. "Engagement" means an explicit recall or a
+# re-add, NOT passive auto-injection, so genuinely idle memories age out.
+_DAY = 86400.0
+DECAY_DAYS = 14            # unused this long: full text collapses to a summary
+STALE_DAYS = 60           # unused this long: dropped from auto-injection (kept,
+                          #   still searchable via recall)
+SUMMARY_CHARS = 80        # how short a summarised item reads in the prompt
+
 
 @dataclass
 class MemoryItem:
@@ -68,9 +77,9 @@ class Memory:
         for it in self.items:
             if it.text.lower() == key:
                 it.last_used = now
+                it.tier = "full"          # re-adding re-engages: undo any decay
                 if kind == "pinned":      # pinning an existing note sticks it
                     it.kind = "pinned"
-                    it.tier = "full"
                 return it
         item = MemoryItem(text=text, kind=kind, created=now, last_used=now)
         self.items.append(item)
@@ -94,11 +103,31 @@ class Memory:
         return None
 
     # -- queries ------------------------------------------------------------- #
-    def search(self, query: str) -> list[MemoryItem]:
+    def search(self, query: str, now: float | None = None) -> list[MemoryItem]:
         low = (query or "").lower().strip()
-        if not low:
-            return list(self.items)
-        return [it for it in self.items if low in it.text.lower()]
+        now = time.time() if now is None else now
+        hits = self.items if not low else \
+            [it for it in self.items if low in it.text.lower()]
+        for it in hits:                  # an explicit recall re-engages an item
+            it.last_used = now
+            if it.kind != "pinned":
+                it.tier = "full"
+        return list(hits)
+
+    # -- decay (issue #11) --------------------------------------------------- #
+    def decay(self, now: float | None = None) -> int:
+        """Age unengaged, non-pinned memory: full -> summary after DECAY_DAYS of
+        no use. Nothing is deleted (staleness only hides items from injection,
+        in render_prompt). Returns how many items newly collapsed to summary."""
+        now = time.time() if now is None else now
+        changed = 0
+        for it in self.items:
+            if it.kind == "pinned" or it.tier != "full":
+                continue
+            if now - it.last_used > DECAY_DAYS * _DAY:
+                it.tier = "summary"
+                changed += 1
+        return changed
 
     def _ordered(self) -> list[MemoryItem]:
         """Pinned first, then most-recently-used — the order both injection and
@@ -109,20 +138,30 @@ class Memory:
     # -- rendering ----------------------------------------------------------- #
     def render_prompt(self, now: float | None = None) -> str:
         """A compact block injected into a fresh session so the agent recalls
-        what matters. Empty when there's nothing to say. Marks the injected
-        items as just-used so decay leaves recalled things alone."""
+        what matters. Empty when there's nothing to say.
+
+        Decay shapes what's shown (it does NOT mark items used — passive
+        injection isn't engagement, or nothing would ever age):
+          * pinned items: always shown in full
+          * stale items (unused > STALE_DAYS): hidden from injection but kept
+          * summary-tier items: truncated to SUMMARY_CHARS so they fade quietly
+        """
         if not self.items:
             return ""
         now = time.time() if now is None else now
         lines, used = [], 0
         for it in self._ordered()[:MAX_INJECT_ITEMS]:
+            if it.kind != "pinned" and now - it.last_used > STALE_DAYS * _DAY:
+                continue                 # too stale to inject (still recallable)
+            text = it.text
+            if it.tier == "summary" and len(text) > SUMMARY_CHARS:
+                text = text[:SUMMARY_CHARS].rstrip() + "…"
             tag = "📌" if it.kind == "pinned" else "·"
-            line = f"{tag} {it.text}"
+            line = f"{tag} {text}"
             if used + len(line) > MAX_INJECT_CHARS:
                 break
             lines.append(line)
             used += len(line)
-            it.last_used = now
         if not lines:
             return ""
         return ("WHAT YOU REMEMBER (carried from earlier sessions — treat as "
@@ -136,7 +175,8 @@ class Memory:
         out = [f"🧠 {len(self.items)} remembered:"]
         for i, it in enumerate(self._ordered(), 1):
             tag = "📌" if it.kind == "pinned" else ("📝" if it.kind == "note" else "•")
-            out.append(f"{i}. {tag} {it.text}")
+            faded = " ·faded" if it.tier == "summary" else ""
+            out.append(f"{i}. {tag} {it.text}{faded}")
         return "\n".join(out)
 
     # -- persistence --------------------------------------------------------- #
