@@ -853,6 +853,43 @@ async def cmd_todo(update: Update, ctx):
         "/todo rm <#> · /todo clear")
 
 
+async def cmd_cr(update: Update, ctx):
+    """Code-review mini-app (#21): a shortcut to the /code-review skill."""
+    s = await _session(update, ctx)
+    args = " ".join(ctx.args or []).strip()
+    await s.feed(f"/code-review {args}".strip(), echo=True)
+
+
+async def cmd_research(update: Update, ctx):
+    """Research mini-app (#22): drive the deep-research skill on a question."""
+    s = await _session(update, ctx)
+    q = " ".join(ctx.args or []).strip()
+    if not q:
+        await update.message.reply_text(
+            "usage: /research <question> — I'll run a deep, cited research pass.")
+        return
+    await s.feed(
+        "Use the deep-research skill to research this thoroughly and return a "
+        f"cited report: {q}")
+
+
+async def cmd_plan(update: Update, ctx):
+    """Daily planner mini-app (#23): build today's plan from tasks + agenda."""
+    import time as _t
+    from .dream import build_agenda
+    s = await _session(update, ctx)
+    m = mgr(ctx)
+    jobs = m.scheduler.list_jobs() if m.scheduler else []
+    agenda = build_agenda(jobs, _t.time()) or "Nothing scheduled in the next 24h."
+    extra = " ".join(ctx.args or []).strip()
+    await s.feed(
+        "[daily plan] Build me a focused, realistically-ordered plan for today "
+        "— what to tackle first and why. Ask at most one clarifying question, "
+        "only if truly needed.\n\n"
+        f"📋 My tasks:\n{m.todos.render()}\n\n{agenda}"
+        + (f"\n\nAlso note: {extra}" if extra else ""))
+
+
 async def cmd_expense(update: Update, ctx):
     """Pocket expense tracker (#24)."""
     from .expenses import parse_amount_note
