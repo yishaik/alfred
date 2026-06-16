@@ -74,6 +74,7 @@ async def post_init(app):
     m.start_proactive_loop()
     m.start_digest_loop()
     m.start_escalate_loop()
+    m.start_dream_loop()
     try:
         await app.bot.set_my_commands(BOT_COMMANDS)
     except Exception:

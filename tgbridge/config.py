@@ -128,6 +128,7 @@ PROACTIVE_QUIET_START, PROACTIVE_QUIET_END = \
 HEALTH_TIME = os.environ.get("BRIDGE_HEALTH_TIME", "09:00")      # "" disables the daily report
 DIGEST_TIME = os.environ.get("BRIDGE_DIGEST_TIME", "")           # "" = off; e.g. "20:00" for an evening recap
 ESCALATE_MINUTES = float(os.environ.get("BRIDGE_ESCALATE_MINUTES", "10"))  # 0 = off
+DREAM_TIME = os.environ.get("BRIDGE_DREAM_TIME", "")             # "" = off; early-morning brief, e.g. "06:00"
 MONTHLY_BUDGET_USD = float(os.environ.get("BRIDGE_MONTHLY_BUDGET_USD", "0"))  # 0 = off
 CONTEXT_WARN_PCT = float(os.environ.get("BRIDGE_CONTEXT_WARN_PCT", "70"))
 SHOW_DIFFS = os.environ.get("BRIDGE_SHOW_DIFFS", "1") not in ("0", "false", "off")

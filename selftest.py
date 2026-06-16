@@ -307,6 +307,28 @@ def test_memory():
           any(it.kind == "pinned" for it in back.items))
 
 
+def test_dream_agenda():
+    from tgbridge.dream import build_agenda
+
+    now = 1_000_000.0
+    jobs = [
+        {"next_ts": now + 3600, "next_human": "09:00", "kind": "remind",
+         "text": "standup"},
+        {"next_ts": now + 7200, "next_human": "10:00", "kind": "prompt",
+         "text": "check CI"},
+        {"next_ts": now + 200000, "next_human": "tomorrow", "kind": "remind",
+         "text": "too far out"},
+        {"next_ts": now - 100, "next_human": "past", "kind": "remind",
+         "text": "already fired"},
+    ]
+    out = build_agenda(jobs, now)
+    check("agenda includes within-horizon", "standup" in out and "check CI" in out)
+    check("agenda excludes beyond horizon", "too far out" not in out)
+    check("agenda excludes past", "already fired" not in out)
+    check("agenda counts items", "coming up (2)" in out)
+    check("empty agenda is blank", build_agenda([], now) == "")
+
+
 def test_escalate():
     from tgbridge.escalate import (assess, SYS_DISK_WARN_GB, PROJ_DISK_WARN_GB,
                                    QUEUE_WARN, CRASH_WARN)
@@ -625,6 +647,7 @@ if __name__ == "__main__":
     test_memory()
     test_memory_decay()
     test_digest()
+    test_dream_agenda()
     test_escalate()
     test_mood()
     test_proactive()

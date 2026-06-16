@@ -15,13 +15,14 @@ from datetime import date, datetime, timedelta
 
 from . import metrics
 from .config import (AGENTS_FILE, BACKUP_DIR, CHAT_ID, COSTS_FILE, DIGEST_TIME,
-                     ESCALATE_MINUTES, HEALTH_TIME, LEGACY_SESSION_FILE,
-                     MAX_HOPS, MEMORY_FILE, MONTHLY_BUDGET_USD,
-                     PAIR_MSGS_PER_5MIN, PROACTIVE_IDLE_HOURS,
-                     PROACTIVE_QUIET_END, PROACTIVE_QUIET_START, ROOT,
-                     SESSIONS_FILE, STATE_DIR, TOPICS_FILE, load_json,
-                     save_json, system_drive_free_gb)
+                     DREAM_TIME, ESCALATE_MINUTES, HEALTH_TIME,
+                     LEGACY_SESSION_FILE, MAX_HOPS, MEMORY_FILE,
+                     MONTHLY_BUDGET_USD, PAIR_MSGS_PER_5MIN,
+                     PROACTIVE_IDLE_HOURS, PROACTIVE_QUIET_END,
+                     PROACTIVE_QUIET_START, ROOT, SESSIONS_FILE, STATE_DIR,
+                     TOPICS_FILE, load_json, save_json, system_drive_free_gb)
 from .digest import build_digest
+from .dream import dream_brief
 from .escalate import CRASH_WINDOW_S, assess
 from .memory import Memory
 from .ratelimit import PairLimiter
@@ -71,6 +72,7 @@ class AgentManager:
         self._proactive_task: asyncio.Task | None = None
         self._digest_task: asyncio.Task | None = None
         self._escalate_task: asyncio.Task | None = None
+        self._dream_task: asyncio.Task | None = None
         self._crash_times: list[float] = []     # monotonic stamps of recent crashes
         self._active_alerts: set[str] = set()    # escalation keys currently tripped
 
@@ -231,6 +233,8 @@ class AgentManager:
             self._digest_task.cancel()
         if self._escalate_task:
             self._escalate_task.cancel()
+        if self._dream_task:
+            self._dream_task.cancel()
         for s in list(self.sessions.values()):
             await s.stop()
             await s.outbox.stop()
@@ -406,6 +410,31 @@ class AgentManager:
                 return
             except Exception:
                 log.exception("escalation check failed")
+
+    # -- dream mode (issue #9) -----------------------------------------------#
+    def start_dream_loop(self):
+        if DREAM_TIME:
+            self._dream_task = asyncio.create_task(self._dream_loop())
+
+    async def _dream_loop(self):
+        import time as _time
+        h, m = (int(x) for x in DREAM_TIME.split(":"))
+        while True:
+            try:
+                now = datetime.now()
+                nxt = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                if nxt <= now:
+                    nxt += timedelta(days=1)
+                await asyncio.sleep((nxt - now).total_seconds())
+                # tidy up, then deliver the morning brief
+                self.backup_state()
+                self.decay_memories()
+                await self.bot.send_message(CHAT_ID, dream_brief(self, _time.time()))
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                log.exception("dream pass failed")
+                await asyncio.sleep(3600)
 
     # -- markers / bot-to-bot -------------------------------------------------#
     async def handle_markers(self, session: AgentSession, parsed):
