@@ -398,6 +398,45 @@ async def cmd_soul(update: Update, ctx):
         "/soul add values|quirks <text> · /soul clear")
 
 
+async def cmd_remember(update: Update, ctx):
+    """Pin a fact the agent should carry across sessions (issue #12)."""
+    s = await _session(update, ctx)
+    text = " ".join(ctx.args or []).strip()
+    if not text:
+        await update.message.reply_text(
+            "usage: /remember <text> — pins something I'll recall in every "
+            "future session. /memory to list, /forget to drop.")
+        return
+    mem = mgr(ctx).memory_for(s.cfg.name)
+    mem.add(text, kind="pinned")
+    mgr(ctx).save_memory()
+    await update.message.reply_text(
+        f"📌 remembered. I'll carry this into future sessions.\n“{text[:200]}”")
+
+
+async def cmd_forget(update: Update, ctx):
+    """Drop a remembered item by number or text (issue #15)."""
+    s = await _session(update, ctx)
+    ref = " ".join(ctx.args or []).strip()
+    mem = mgr(ctx).memory_for(s.cfg.name)
+    if not ref:
+        await update.message.reply_text(
+            mem.render_list() + "\n\nforget with: /forget <number|text>")
+        return
+    removed = mem.remove(ref)
+    if removed is None:
+        await update.message.reply_text(f"🤔 nothing matched “{ref}”. /memory to list.")
+        return
+    mgr(ctx).save_memory()
+    await update.message.reply_text(f"🗑 forgotten: “{removed[:200]}”")
+
+
+async def cmd_memory(update: Update, ctx):
+    """List everything the agent remembers (issues #12/#14)."""
+    s = await _session(update, ctx)
+    await update.message.reply_text(mgr(ctx).memory_for(s.cfg.name).render_list())
+
+
 def voice_kb(current: str, names: list) -> InlineKeyboardMarkup:
     rows, row = [], []
     for v in names:
