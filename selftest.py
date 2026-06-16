@@ -467,6 +467,15 @@ def test_digest():
     ]
     a = summarize_audit(lines, "2026-06-16")
     check("digest counts today only", a["total"] == 4)
+    # tool breakdown by category (#27)
+    from tgbridge.digest import categorize_tool, tool_breakdown
+    check("categorize shell", categorize_tool("Bash") == "🐚 shell")
+    check("categorize files", categorize_tool("Edit") == "📄 files")
+    check("categorize bridge mcp", categorize_tool("mcp__bridge__remember") == "🔧 bridge")
+    check("categorize other", categorize_tool("Task") == "🧩 other")
+    cats = tool_breakdown(lines, "2026-06-16")
+    check("breakdown groups today",  # Read+Read+Write today; Glob is yesterday
+          cats["📄 files"] == 3 and cats["🐚 shell"] == 1)
     check("digest ignores yesterday", a["tools"].get("Glob", 0) == 0)
     check("digest top tool", a["tools"]["Read"] == 2)
     check("digest per-agent", set(a["agents"]) == {"main", "docs"})

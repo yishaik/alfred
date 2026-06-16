@@ -802,6 +802,32 @@ async def cmd_digest(update: Update, ctx):
     await update.message.reply_text(build_digest(mgr(ctx)))
 
 
+async def cmd_costs(update: Update, ctx):
+    """Cost totals plus today's tool-activity breakdown by category (#27)."""
+    from datetime import date
+    from .config import AUDIT_FILE, MONTHLY_BUDGET_USD
+    from .digest import tool_breakdown
+    m = mgr(ctx)
+    today = date.today().isoformat()
+    lines = [f"💰 today ${m.today_cost():.2f} · month ${m.month_cost():.2f}"
+             + (f" / ${MONTHLY_BUDGET_USD:.0f}" if MONTHLY_BUDGET_USD else "")]
+    try:
+        raw = await asyncio.to_thread(
+            AUDIT_FILE.read_text, encoding="utf-8", errors="replace")
+        cats = tool_breakdown(raw.splitlines(), today)
+    except OSError:
+        cats = None
+    if cats:
+        total = sum(cats.values())
+        lines.append(f"🛠 {total} tool calls today by type:")
+        for label, cnt in cats.most_common():
+            bar = "▰" * round(cnt / total * 10) or "▱"
+            lines.append(f"  {label:9} {bar} {cnt}")
+    else:
+        lines.append("🛠 no tracked tool activity today")
+    await update.message.reply_text("\n".join(lines))
+
+
 async def cmd_jobs(update: Update, ctx):
     text, kb = jobs_kb(mgr(ctx))
     await update.message.reply_text(text[:4000], reply_markup=kb)
