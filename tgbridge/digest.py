@@ -43,6 +43,40 @@ def _top(counter: Counter, n: int = 4) -> str:
     return " · ".join(f"{name} {cnt}" for name, cnt in counter.most_common(n))
 
 
+# Tool -> activity category, for the /costs breakdown (#27). Exact per-tool
+# cost isn't available (the SDK bills per turn), so we report where the tool
+# *activity* went, which is what the breakdown is really asking.
+_CATEGORIES = [
+    ("🐚 shell", {"Bash", "PowerShell"}),
+    ("📄 files", {"Read", "Write", "Edit", "MultiEdit", "NotebookEdit",
+                  "NotebookRead", "Glob", "Grep"}),
+    ("🌐 web", {"WebFetch", "WebSearch"}),
+]
+
+
+def categorize_tool(name: str) -> str:
+    if name.startswith("mcp__"):
+        return "🔧 bridge"
+    for label, names in _CATEGORIES:
+        if name in names:
+            return label
+    return "🧩 other"
+
+
+def tool_breakdown(raw_lines: list, day: str) -> Counter:
+    """Pure: tool-call counts grouped by activity category for `day`."""
+    cats: Counter = Counter()
+    for ln in raw_lines:
+        try:
+            e = json.loads(ln)
+        except (ValueError, TypeError):
+            continue
+        if not str(e.get("ts", "")).startswith(day):
+            continue
+        cats[categorize_tool(e.get("tool", "?"))] += 1
+    return cats
+
+
 def build_digest(mgr, day: str | None = None) -> str:
     """Assemble the phone-friendly digest for `day` (default today)."""
     day = day or date.today().isoformat()
