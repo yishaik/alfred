@@ -307,6 +307,23 @@ def test_memory():
           any(it.kind == "pinned" for it in back.items))
 
 
+def test_mute():
+    from tgbridge.outbox import Outbox
+    o = Outbox(bot=None, chat_id=1)        # producers don't touch the bot
+
+    o.emit("hello"); o.file("x.png"); o.stream_delta("hi")
+    check("unmuted enqueues", o.queue.qsize() == 3)
+
+    o.muted = True
+    o.emit("dropped"); o.file("y.png"); o.keyboard("k", None)
+    o.stream_delta("z"); o.stream_close("done")
+    check("muted drops every producer", o.queue.qsize() == 3)
+
+    o.muted = False
+    o.emit("back")
+    check("unmute restores delivery", o.queue.qsize() == 4)
+
+
 def test_watchers(tmp_dir):
     from tgbridge.watchers import (Watcher, compute_state, detect_kind,
                                    dir_signature)
@@ -675,6 +692,7 @@ if __name__ == "__main__":
     test_ratelimit()
     test_imports()
     test_session_pure()
+    test_mute()
     test_soul()
     test_memory()
     test_memory_decay()

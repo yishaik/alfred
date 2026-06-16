@@ -53,6 +53,9 @@ class Outbox:
         self.stream_seen = False   # session checks this to avoid double-printing
         self._page_store: dict[int, list[str]] = {}
         self._page_counter: int = 0
+        # mute (#19): when True, every producer is a no-op so the session keeps
+        # running and holding its context but sends nothing to this route.
+        self.muted = False
 
     def start(self):
         if self._task is None or self._task.done():
@@ -73,28 +76,35 @@ class Outbox:
 
     # -- producers (sync, callable from anywhere) --------------------------- #
     def emit(self, text: str):
-        if text:
+        if text and not self.muted:
             self.queue.put_nowait(("text", text))
 
     def file(self, path: str):
-        self.queue.put_nowait(("file", path))
+        if not self.muted:
+            self.queue.put_nowait(("file", path))
 
     def voice(self, path: str, as_voice: bool = True):
         """Send synthesized speech (temp file is deleted after sending)."""
+        if self.muted:
+            return
         self.queue.put_nowait(("vc", path, as_voice))
 
     def keyboard(self, text: str, markup: InlineKeyboardMarkup, on_sent=None):
         """Send text with an inline keyboard; on_sent(message) is awaited after."""
-        self.queue.put_nowait(("kb", text, markup, on_sent))
+        if not self.muted:
+            self.queue.put_nowait(("kb", text, markup, on_sent))
 
     def stream_delta(self, text: str):
+        if self.muted:
+            return
         self.stream_seen = True
         self.queue.put_nowait(("sd", text))
 
     def stream_close(self, final_clean_md: str | None, markup=None):
         """Finalize the current draft. final_clean_md replaces the draft tail
         (markers stripped); None keeps whatever streamed."""
-        self.queue.put_nowait(("sc", final_clean_md, markup))
+        if not self.muted:
+            self.queue.put_nowait(("sc", final_clean_md, markup))
 
     # -- sender loop --------------------------------------------------------- #
     async def _run(self):

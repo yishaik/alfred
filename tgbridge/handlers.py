@@ -163,8 +163,9 @@ async def cmd_panel(update: Update, ctx):
                 if s.ctx_pct is not None else "")
     tts_part = " · 🔊" if s.cfg.tts else ""
     mood_part = f" · {s.mood.label()}" if s.cfg.soul.is_set() else ""
+    mute_part = " · 🔇 muted" if s.outbox.muted else ""
     header = (f"⚡ {s.cfg.name} · 🧠 {_pretty_model(s.model) or 'default'} · "
-              f"💰 ${m.today_cost():.2f} today{ctx_part}{tts_part}{mood_part}")
+              f"💰 ${m.today_cost():.2f} today{ctx_part}{tts_part}{mood_part}{mute_part}")
     await update.message.reply_text(header, reply_markup=panel_kb(s))
 
 
@@ -186,6 +187,27 @@ async def cmd_interrupt(update: Update, ctx):
 
 async def cmd_stop(update: Update, ctx):
     await (await _session(update, ctx)).interrupt()
+
+
+async def cmd_mute(update: Update, ctx):
+    """Silence this route's output without closing the session (issue #19)."""
+    s = await _session(update, ctx)
+    arg = (ctx.args or [""])[0].lower()
+    want = True if arg in ("on", "1") else False if arg in ("off", "0") else \
+        not s.outbox.muted
+    s.outbox.muted = want
+    if want:
+        await update.message.reply_text(
+            "🔇 muted — this session keeps running and remembers everything, "
+            "but won't send messages here until /mute off (or /unmute).")
+    else:
+        await update.message.reply_text("🔊 unmuted — messages will come through again.")
+
+
+async def cmd_unmute(update: Update, ctx):
+    s = await _session(update, ctx)
+    s.outbox.muted = False
+    await update.message.reply_text("🔊 unmuted — messages will come through again.")
 
 
 async def cmd_kill(update: Update, ctx):
