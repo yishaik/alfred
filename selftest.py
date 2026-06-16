@@ -307,6 +307,46 @@ def test_memory():
           any(it.kind == "pinned" for it in back.items))
 
 
+def test_memory_decay():
+    from tgbridge.memory import (Memory, DECAY_DAYS, STALE_DAYS, SUMMARY_CHARS,
+                                 _DAY)
+    t0 = 1_000_000.0
+
+    m = Memory()
+    m.add("pinned thing", kind="pinned", now=t0)
+    m.add("a long-winded note " + "x" * 100, kind="note", now=t0)
+    m.add("short note", kind="note", now=t0)
+
+    # nothing decays before the window
+    check("no early decay", m.decay(now=t0 + (DECAY_DAYS - 1) * _DAY) == 0)
+
+    # past the window, non-pinned notes collapse to summary; pinned is exempt
+    aged = t0 + (DECAY_DAYS + 1) * _DAY
+    check("two notes decayed", m.decay(now=aged) == 2)
+    kinds = {it.text[:6]: it.tier for it in m.items}
+    check("pinned stays full", kinds["pinned"] == "full")
+    check("note went summary", kinds["a long"] == "summary")
+    check("decay is idempotent", m.decay(now=aged) == 0)
+
+    # a summarised long note is truncated in the prompt; pinned shown in full
+    block = m.render_prompt(now=aged)
+    check("summary truncated in prompt", "…" in block)
+    check("pinned still injected", "pinned thing" in block)
+
+    # very stale, non-pinned items drop OUT of injection but remain stored
+    stale = t0 + (STALE_DAYS + 1) * _DAY
+    block2 = m.render_prompt(now=stale)
+    check("stale note not injected", "short note" not in block2)
+    check("pinned survives staleness", "pinned thing" in block2)
+    check("stale item still stored", len(m.search("short note")) == 1)
+
+    # an explicit recall re-engages a faded item back to full
+    m.search("long-winded", now=stale)
+    revived = [it for it in m.items if it.text.startswith("a long")][0]
+    check("recall revives tier", revived.tier == "full")
+    check("recall refreshes recency", revived.last_used == stale)
+
+
 def test_voice_picker():
     import tgbridge.voice as v
     from tgbridge.session import AgentConfig
@@ -539,6 +579,7 @@ if __name__ == "__main__":
     test_session_pure()
     test_soul()
     test_memory()
+    test_memory_decay()
     test_mood()
     test_proactive()
     test_voice_picker()

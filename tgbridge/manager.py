@@ -103,6 +103,14 @@ class AgentManager:
                                 for name, mem in self.memories.items()
                                 if mem.items})
 
+    def decay_memories(self) -> int:
+        """Daily maintenance: fade unengaged memory across all agents. Persists
+        only if something actually changed. Returns the number of items aged."""
+        changed = sum(mem.decay() for mem in self.memories.values())
+        if changed:
+            self.save_memory()
+        return changed
+
     def add_cost(self, usd: float) -> tuple[float, str | None]:
         """Accumulate cost; returns (today_total, budget_alert|None)."""
         key = date.today().isoformat()
@@ -313,6 +321,7 @@ class AgentManager:
                     nxt += timedelta(days=1)
                 await asyncio.sleep((nxt - now).total_seconds())
                 self.backup_state()
+                self.decay_memories()
                 await self.bot.send_message(CHAT_ID, self.health_text())
             except asyncio.CancelledError:
                 return
