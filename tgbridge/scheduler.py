@@ -121,10 +121,11 @@ class Scheduler:
             metrics.bump("sched_fail")
             log.exception("job %s delivery failed", job["id"])
         if not delivered and not job.get("recur"):
-            # don't lose a one-shot reminder to a transient failure
+            # don't lose a one-shot reminder to a transient failure; back off
+            # exponentially (60s, 120s, 240s) so a flapping target isn't hammered
             job["fails"] = job.get("fails", 0) + 1
             if job["fails"] <= 3:
-                job["next_ts"] = time.time() + 60
+                job["next_ts"] = time.time() + 60 * (2 ** (job["fails"] - 1))
                 return
             log.error("job %s dropped after repeated delivery failures", job["id"])
             self.jobs = [j for j in self.jobs if j["id"] != job["id"]]

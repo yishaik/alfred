@@ -206,6 +206,7 @@ def main():
         "digest": handlers.cmd_digest,
         "watch": handlers.cmd_watch,
         "unwatch": handlers.cmd_unwatch,
+        "peers": handlers.cmd_peers,
         "audit": handlers.cmd_audit,
         "logs": handlers.cmd_logs,
     }

@@ -404,6 +404,9 @@ async def cmd_secretary(update: Update, ctx):
 
 def _valid_dir(path: str) -> bool:
     import os
+    from .config import is_dangerous_workdir
+    if is_dangerous_workdir(path):   # block drive roots, Windows, network shares
+        return False
     if os.path.isdir(path):
         return True
     try:
@@ -688,6 +691,15 @@ async def cmd_fork(update: Update, ctx):
     s = await _session(update, ctx)
     await s.restart(resume=True, fork=True,
                     note="🔱 forking conversation — edits branch from here…")
+
+
+async def cmd_peers(update: Update, ctx):
+    """Peer-bus diagnostics: listener state + per-peer reachability (#26)."""
+    m = mgr(ctx)
+    if not m.peers:
+        await update.message.reply_text("peer bus not initialised")
+        return
+    await update.message.reply_text(await m.peers.diagnostics())
 
 
 async def cmd_audit(update: Update, ctx):
