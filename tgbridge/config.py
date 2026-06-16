@@ -165,6 +165,7 @@ SESSIONS_FILE = STATE_DIR / "sessions.json"
 JOBS_FILE = STATE_DIR / "jobs.json"
 COSTS_FILE = STATE_DIR / "costs.json"
 TOPICS_FILE = STATE_DIR / "topics.json"
+MEMORY_FILE = STATE_DIR / "memory.json"          # {agent: [memory items]}
 AUDIT_FILE = STATE_DIR / "audit.jsonl"
 APP_LOG_FILE = STATE_DIR / "bridge-app.log"
 BACKUP_DIR = STATE_DIR / "backup"

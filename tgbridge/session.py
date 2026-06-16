@@ -262,6 +262,9 @@ class AgentSession:
         soul_block = self.cfg.soul.render_prompt()
         if soul_block:
             prompt += f"\n\n{soul_block}"
+        mem_block = self.mgr.memory_for(self.cfg.name).render_prompt()
+        if mem_block:
+            prompt += f"\n\n{mem_block}"
         if self.cfg.secretary:
             prompt += SECRETARY_PROMPT
         return ClaudeAgentOptions(

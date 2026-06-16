@@ -15,11 +15,12 @@ from datetime import date, datetime, timedelta
 
 from . import metrics
 from .config import (AGENTS_FILE, BACKUP_DIR, CHAT_ID, COSTS_FILE, HEALTH_TIME,
-                     LEGACY_SESSION_FILE, MAX_HOPS, MONTHLY_BUDGET_USD,
-                     PAIR_MSGS_PER_5MIN, PROACTIVE_IDLE_HOURS,
-                     PROACTIVE_QUIET_END, PROACTIVE_QUIET_START, ROOT,
-                     SESSIONS_FILE, STATE_DIR, TOPICS_FILE, load_json,
-                     save_json, system_drive_free_gb)
+                     LEGACY_SESSION_FILE, MAX_HOPS, MEMORY_FILE,
+                     MONTHLY_BUDGET_USD, PAIR_MSGS_PER_5MIN,
+                     PROACTIVE_IDLE_HOURS, PROACTIVE_QUIET_END,
+                     PROACTIVE_QUIET_START, ROOT, SESSIONS_FILE, STATE_DIR,
+                     TOPICS_FILE, load_json, save_json, system_drive_free_gb)
+from .memory import Memory
 from .ratelimit import PairLimiter
 from .session import AgentConfig, AgentSession, TurnSource
 
@@ -51,6 +52,9 @@ class AgentManager:
         self._migrate_legacy()
         self.topics: dict[str, str] = load_json(TOPICS_FILE, {})  # thread_id -> agent
         self.costs: dict[str, float] = load_json(COSTS_FILE, {})
+        raw_mem = load_json(MEMORY_FILE, {})
+        self.memories: dict[str, Memory] = {
+            name: Memory.from_list(items) for name, items in raw_mem.items()}
         self.sessions: dict[str, AgentSession] = {}
         self.by_sid: dict[int, AgentSession] = {}
         self._sid_seq = 0
@@ -86,6 +90,18 @@ class AgentManager:
 
     def save_topics(self):
         save_json(TOPICS_FILE, self.topics)
+
+    def memory_for(self, agent: str) -> Memory:
+        """The (lazily-created) long-term memory for an agent."""
+        mem = self.memories.get(agent)
+        if mem is None:
+            mem = self.memories[agent] = Memory()
+        return mem
+
+    def save_memory(self):
+        save_json(MEMORY_FILE, {name: mem.to_list()
+                                for name, mem in self.memories.items()
+                                if mem.items})
 
     def add_cost(self, usd: float) -> tuple[float, str | None]:
         """Accumulate cost; returns (today_total, budget_alert|None)."""

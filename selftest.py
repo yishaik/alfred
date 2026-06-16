@@ -264,6 +264,46 @@ def test_session_pure():
           AgentConfig.from_dict("x", cfg.to_dict()).secretary is True)
 
 
+def test_memory():
+    from tgbridge.memory import Memory
+
+    m = Memory()
+    check("empty memory renders nothing", m.render_prompt() == "")
+    m.add("the user's name is Yishai", kind="pinned", now=100)
+    m.add("prefers terse replies", kind="note", now=101)
+    check("two items stored", len(m.items) == 2)
+
+    # de-dupe on text; a repeat doesn't grow the list
+    m.add("prefers terse replies", kind="note", now=102)
+    check("dedupe keeps one", len(m.items) == 2)
+    # empty text is ignored
+    check("empty add ignored", m.add("   ") is None and len(m.items) == 2)
+
+    # pinning an existing note upgrades its kind
+    m.add("prefers terse replies", kind="pinned", now=103)
+    pinned_texts = [it.text for it in m.items if it.kind == "pinned"]
+    check("note upgraded to pinned", "prefers terse replies" in pinned_texts)
+
+    # injection: pinned first, and a "remember" header present
+    block = m.render_prompt(now=200)
+    check("render has header", "WHAT YOU REMEMBER" in block)
+    check("pinned marked", "📌" in block)
+
+    # search + forget by substring and by index
+    check("search finds", len(m.search("terse")) == 1)
+    removed = m.remove("Yishai")
+    check("forget by substring", removed and "Yishai" in removed)
+    check("one left", len(m.items) == 1)
+    check("forget bad index", m.remove("99") is None)
+
+    # persistence roundtrip
+    m.add("likes Hebrew", kind="fact", now=300)
+    back = Memory.from_list(m.to_list())
+    check("memory roundtrip count", len(back.items) == len(m.items))
+    check("memory roundtrip kind",
+          any(it.kind == "pinned" for it in back.items))
+
+
 def test_voice_picker():
     import tgbridge.voice as v
     from tgbridge.session import AgentConfig
@@ -495,6 +535,7 @@ if __name__ == "__main__":
     test_imports()
     test_session_pure()
     test_soul()
+    test_memory()
     test_mood()
     test_proactive()
     test_voice_picker()
