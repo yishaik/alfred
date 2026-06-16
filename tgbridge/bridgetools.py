@@ -14,7 +14,8 @@ log = logging.getLogger("bridge.tools")
 
 SERVER_NAME = "bridge"
 TOOL_NAMES = ["send_file", "send_buttons", "message_agent",
-              "schedule", "unschedule", "list_jobs"]
+              "schedule", "unschedule", "list_jobs",
+              "remember", "forget", "recall"]
 # fully-qualified names for allowed_tools
 ALLOWED = [f"mcp__{SERVER_NAME}__{t}" for t in TOOL_NAMES]
 
@@ -106,7 +107,46 @@ def build_bridge_server(session):
                  + f" [{j['agent']}]: {j['text'][:80]}" for j in jobs]
         return _text("\n".join(lines))
 
+    @tool("remember", "Save something to long-term memory so you recall it in "
+          "future sessions (it's injected into every fresh session). Use for "
+          "durable facts about the user, decisions, open loops, and contacts — "
+          "NOT for transient chatter. kind='note' for your own observations, "
+          "'fact' for reference knowledge, 'pinned' for must-never-forget.",
+          {"text": str,
+           "kind": Annotated[str, "note | fact | pinned (default note)"]})
+    async def remember(args):
+        text = str(args.get("text", "")).strip()
+        if not text:
+            return _text("text is required", err=True)
+        kind = str(args.get("kind") or "note")
+        item = mgr.memory_for(session.cfg.name).add(text, kind=kind)
+        if item is None:
+            return _text("nothing to remember", err=True)
+        mgr.save_memory()
+        return _text(f"remembered ({item.kind}): {text[:120]}")
+
+    @tool("forget", "Remove an item from long-term memory by a substring of its "
+          "text. Use when something you stored is now wrong or obsolete.",
+          {"text": Annotated[str, "substring identifying the item to drop"]})
+    async def forget(args):
+        removed = mgr.memory_for(session.cfg.name).remove(str(args.get("text", "")))
+        if removed is None:
+            return _text("no matching memory found", err=True)
+        mgr.save_memory()
+        return _text(f"forgotten: {removed[:120]}")
+
+    @tool("recall", "Search your long-term memory. Empty query returns "
+          "everything. Use to check what you already know before asking the "
+          "user to repeat themselves.",
+          {"query": Annotated[str, "substring to search for (optional)"]})
+    async def recall(args):
+        hits = mgr.memory_for(session.cfg.name).search(str(args.get("query", "")))
+        if not hits:
+            return _text("(nothing remembered yet)")
+        return _text("\n".join(f"[{it.kind}] {it.text}" for it in hits[:40]))
+
     return create_sdk_mcp_server(
         name=SERVER_NAME, version="1.0.0",
         tools=[send_file, send_buttons, message_agent,
-               schedule, unschedule, list_jobs])
+               schedule, unschedule, list_jobs,
+               remember, forget, recall])

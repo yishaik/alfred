@@ -197,6 +197,9 @@ def test_bridgetools_meta():
     from tgbridge.bridgetools import ALLOWED, TOOL_NAMES
     check("bridge tool names", "mcp__bridge__send_file" in ALLOWED
           and len(ALLOWED) == len(TOOL_NAMES))
+    check("memory tools exposed",
+          {"remember", "forget", "recall"} <= set(TOOL_NAMES)
+          and "mcp__bridge__remember" in ALLOWED)
 
 
 def test_diffs():
