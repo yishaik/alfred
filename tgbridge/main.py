@@ -38,6 +38,7 @@ BOT_COMMANDS = [
     ("proactive", "toggle idle check-ins"),
     ("tts", "toggle voice replies"),
     ("voice", "pick the TTS voice"),
+    ("digest", "what I did today"),
     ("audit", "recent tool calls"),
     ("logs", "recent warnings/errors"),
     ("restart", "restart Claude (resumes)"),
@@ -71,6 +72,7 @@ async def post_init(app):
     await m.peers.start()
     m.start_health_loop()
     m.start_proactive_loop()
+    m.start_digest_loop()
     try:
         await app.bot.set_my_commands(BOT_COMMANDS)
     except Exception:
@@ -188,6 +190,7 @@ def main():
         "sessions": handlers.cmd_sessions,
         "fork": handlers.cmd_fork,
         "find": handlers.cmd_find,
+        "digest": handlers.cmd_digest,
         "audit": handlers.cmd_audit,
         "logs": handlers.cmd_logs,
     }

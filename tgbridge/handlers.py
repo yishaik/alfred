@@ -600,6 +600,12 @@ async def cmd_logs(update: Update, ctx):
         ("🧾 recent warnings/errors:\n" + "\n".join(bad))[:4000])
 
 
+async def cmd_digest(update: Update, ctx):
+    """On-demand 'what happened today' summary (issue #7)."""
+    from .digest import build_digest
+    await update.message.reply_text(build_digest(mgr(ctx)))
+
+
 async def cmd_jobs(update: Update, ctx):
     text, kb = jobs_kb(mgr(ctx))
     await update.message.reply_text(text[:4000], reply_markup=kb)
