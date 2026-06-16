@@ -307,6 +307,17 @@ def test_memory():
           any(it.kind == "pinned" for it in back.items))
 
 
+def test_background_worker():
+    # /bg spins up a worker agent inheriting the active agent's cwd + model,
+    # and must auto-approve so a background task never stalls on a permission tap
+    from tgbridge.session import AgentConfig
+    active = AgentConfig(name="main", workdir="D:\\X", model="opus")
+    worker = AgentConfig(name="bg", workdir=active.workdir, model=active.model)
+    check("worker inherits cwd", worker.workdir == "D:\\X")
+    check("worker inherits model", worker.model == "opus")
+    check("worker auto-approves", worker.auto_approve is True)
+
+
 def test_mute():
     from tgbridge.outbox import Outbox
     o = Outbox(bot=None, chat_id=1)        # producers don't touch the bot
@@ -692,6 +703,7 @@ if __name__ == "__main__":
     test_ratelimit()
     test_imports()
     test_session_pure()
+    test_background_worker()
     test_mute()
     test_soul()
     test_memory()
