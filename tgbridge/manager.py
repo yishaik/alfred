@@ -14,12 +14,13 @@ import time
 from datetime import date, datetime, timedelta
 
 from . import metrics
-from .config import (AGENTS_FILE, BACKUP_DIR, CHAT_ID, COSTS_FILE, HEALTH_TIME,
-                     LEGACY_SESSION_FILE, MAX_HOPS, MEMORY_FILE,
+from .config import (AGENTS_FILE, BACKUP_DIR, CHAT_ID, COSTS_FILE, DIGEST_TIME,
+                     HEALTH_TIME, LEGACY_SESSION_FILE, MAX_HOPS, MEMORY_FILE,
                      MONTHLY_BUDGET_USD, PAIR_MSGS_PER_5MIN,
                      PROACTIVE_IDLE_HOURS, PROACTIVE_QUIET_END,
                      PROACTIVE_QUIET_START, ROOT, SESSIONS_FILE, STATE_DIR,
                      TOPICS_FILE, load_json, save_json, system_drive_free_gb)
+from .digest import build_digest
 from .memory import Memory
 from .ratelimit import PairLimiter
 from .session import AgentConfig, AgentSession, TurnSource
@@ -66,6 +67,7 @@ class AgentManager:
         self._budget_month = date.today().strftime("%Y-%m")
         self._health_task: asyncio.Task | None = None
         self._proactive_task: asyncio.Task | None = None
+        self._digest_task: asyncio.Task | None = None
 
     def _migrate_legacy(self):
         if "main@p" not in self.session_ids and LEGACY_SESSION_FILE.exists():
@@ -220,6 +222,8 @@ class AgentManager:
             self._health_task.cancel()
         if self._proactive_task:
             self._proactive_task.cancel()
+        if self._digest_task:
+            self._digest_task.cancel()
         for s in list(self.sessions.values()):
             await s.stop()
             await s.outbox.stop()
@@ -327,6 +331,27 @@ class AgentManager:
                 return
             except Exception:
                 log.exception("health report failed")
+                await asyncio.sleep(3600)
+
+    # -- daily digest (issue #7) ---------------------------------------------#
+    def start_digest_loop(self):
+        if DIGEST_TIME:
+            self._digest_task = asyncio.create_task(self._digest_loop())
+
+    async def _digest_loop(self):
+        h, m = (int(x) for x in DIGEST_TIME.split(":"))
+        while True:
+            try:
+                now = datetime.now()
+                nxt = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                if nxt <= now:
+                    nxt += timedelta(days=1)
+                await asyncio.sleep((nxt - now).total_seconds())
+                await self.bot.send_message(CHAT_ID, build_digest(self))
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                log.exception("digest failed")
                 await asyncio.sleep(3600)
 
     # -- markers / bot-to-bot -------------------------------------------------#

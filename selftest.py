@@ -307,6 +307,29 @@ def test_memory():
           any(it.kind == "pinned" for it in back.items))
 
 
+def test_digest():
+    import json
+    from tgbridge.digest import summarize_audit
+
+    lines = [
+        json.dumps({"ts": "2026-06-16T09:00:00", "agent": "main", "tool": "Read"}),
+        json.dumps({"ts": "2026-06-16T09:01:00", "agent": "main", "tool": "Read"}),
+        json.dumps({"ts": "2026-06-16T09:02:00", "agent": "main", "tool": "Bash",
+                    "decision": "deny", "guarded": True}),
+        json.dumps({"ts": "2026-06-16T09:03:00", "agent": "docs", "tool": "Write"}),
+        json.dumps({"ts": "2026-06-15T23:59:00", "agent": "main", "tool": "Glob"}),
+        "not json at all",
+    ]
+    a = summarize_audit(lines, "2026-06-16")
+    check("digest counts today only", a["total"] == 4)
+    check("digest ignores yesterday", a["tools"].get("Glob", 0) == 0)
+    check("digest top tool", a["tools"]["Read"] == 2)
+    check("digest per-agent", set(a["agents"]) == {"main", "docs"})
+    check("digest counts denials", a["denials"] == 1)
+    check("digest survives junk lines",
+          summarize_audit(["{bad", ""], "2026-06-16")["total"] == 0)
+
+
 def test_memory_decay():
     from tgbridge.memory import (Memory, DECAY_DAYS, STALE_DAYS, SUMMARY_CHARS,
                                  _DAY)
@@ -580,6 +603,7 @@ if __name__ == "__main__":
     test_soul()
     test_memory()
     test_memory_decay()
+    test_digest()
     test_mood()
     test_proactive()
     test_voice_picker()
