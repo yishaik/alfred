@@ -307,6 +307,27 @@ def test_memory():
           any(it.kind == "pinned" for it in back.items))
 
 
+def test_escalate():
+    from tgbridge.escalate import (assess, SYS_DISK_WARN_GB, PROJ_DISK_WARN_GB,
+                                   QUEUE_WARN, CRASH_WARN)
+
+    # all-clear snapshot trips nothing
+    clear = {"sys_free_gb": 50, "proj_free_gb": 200, "max_queue": 0, "crashes": 0}
+    check("healthy trips nothing", assess(clear) == [])
+
+    # each signal trips its own keyed alert
+    keys = lambda snap: {k for k, _ in assess({**clear, **snap})}
+    check("low system disk trips", "sys_disk" in keys({"sys_free_gb": SYS_DISK_WARN_GB - 1}))
+    check("low project disk trips", "proj_disk" in keys({"proj_free_gb": PROJ_DISK_WARN_GB - 1}))
+    check("queue backlog trips", "queue" in keys({"max_queue": QUEUE_WARN}))
+    check("crash run trips", "crashes" in keys({"crashes": CRASH_WARN}))
+
+    # unknown system disk (None) doesn't false-alarm; multiple signals stack
+    check("none disk no alarm", "sys_disk" not in keys({"sys_free_gb": None}))
+    both = keys({"sys_free_gb": 1, "max_queue": QUEUE_WARN})
+    check("alerts stack", {"sys_disk", "queue"} <= both)
+
+
 def test_digest():
     import json
     from tgbridge.digest import summarize_audit
@@ -604,6 +625,7 @@ if __name__ == "__main__":
     test_memory()
     test_memory_decay()
     test_digest()
+    test_escalate()
     test_mood()
     test_proactive()
     test_voice_picker()

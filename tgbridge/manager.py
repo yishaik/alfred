@@ -15,12 +15,14 @@ from datetime import date, datetime, timedelta
 
 from . import metrics
 from .config import (AGENTS_FILE, BACKUP_DIR, CHAT_ID, COSTS_FILE, DIGEST_TIME,
-                     HEALTH_TIME, LEGACY_SESSION_FILE, MAX_HOPS, MEMORY_FILE,
-                     MONTHLY_BUDGET_USD, PAIR_MSGS_PER_5MIN,
-                     PROACTIVE_IDLE_HOURS, PROACTIVE_QUIET_END,
-                     PROACTIVE_QUIET_START, ROOT, SESSIONS_FILE, STATE_DIR,
-                     TOPICS_FILE, load_json, save_json, system_drive_free_gb)
+                     ESCALATE_MINUTES, HEALTH_TIME, LEGACY_SESSION_FILE,
+                     MAX_HOPS, MEMORY_FILE, MONTHLY_BUDGET_USD,
+                     PAIR_MSGS_PER_5MIN, PROACTIVE_IDLE_HOURS,
+                     PROACTIVE_QUIET_END, PROACTIVE_QUIET_START, ROOT,
+                     SESSIONS_FILE, STATE_DIR, TOPICS_FILE, load_json,
+                     save_json, system_drive_free_gb)
 from .digest import build_digest
+from .escalate import CRASH_WINDOW_S, assess
 from .memory import Memory
 from .ratelimit import PairLimiter
 from .session import AgentConfig, AgentSession, TurnSource
@@ -68,6 +70,9 @@ class AgentManager:
         self._health_task: asyncio.Task | None = None
         self._proactive_task: asyncio.Task | None = None
         self._digest_task: asyncio.Task | None = None
+        self._escalate_task: asyncio.Task | None = None
+        self._crash_times: list[float] = []     # monotonic stamps of recent crashes
+        self._active_alerts: set[str] = set()    # escalation keys currently tripped
 
     def _migrate_legacy(self):
         if "main@p" not in self.session_ids and LEGACY_SESSION_FILE.exists():
@@ -224,6 +229,8 @@ class AgentManager:
             self._proactive_task.cancel()
         if self._digest_task:
             self._digest_task.cancel()
+        if self._escalate_task:
+            self._escalate_task.cancel()
         for s in list(self.sessions.values()):
             await s.stop()
             await s.outbox.stop()
@@ -353,6 +360,52 @@ class AgentManager:
             except Exception:
                 log.exception("digest failed")
                 await asyncio.sleep(3600)
+
+    # -- auto-escalation (issue #8) ------------------------------------------#
+    def note_crash(self) -> None:
+        """A session recorded a crash — feeds the escalation crash signal."""
+        now = time.monotonic()
+        self._crash_times.append(now)
+        self._crash_times = [t for t in self._crash_times
+                             if now - t < CRASH_WINDOW_S]
+
+    def recent_crash_count(self) -> int:
+        now = time.monotonic()
+        self._crash_times = [t for t in self._crash_times
+                             if now - t < CRASH_WINDOW_S]
+        return len(self._crash_times)
+
+    def _signal_snapshot(self) -> dict:
+        try:
+            proj_free = shutil.disk_usage(str(ROOT)).free / 2**30
+        except OSError:
+            proj_free = None
+        return {
+            "sys_free_gb": system_drive_free_gb(),
+            "proj_free_gb": proj_free,
+            "max_queue": max((len(s.pending) for s in self.sessions.values()),
+                             default=0),
+            "crashes": self.recent_crash_count(),
+        }
+
+    def start_escalate_loop(self):
+        if ESCALATE_MINUTES > 0:
+            self._escalate_task = asyncio.create_task(self._escalate_loop())
+
+    async def _escalate_loop(self):
+        while True:
+            try:
+                await asyncio.sleep(ESCALATE_MINUTES * 60)
+                alerts = assess(self._signal_snapshot())
+                tripped = {k for k, _ in alerts}
+                for key, msg in alerts:
+                    if key not in self._active_alerts:   # edge-triggered: once
+                        await self.bot.send_message(CHAT_ID, msg)
+                self._active_alerts = tripped            # cleared keys can re-fire
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                log.exception("escalation check failed")
 
     # -- markers / bot-to-bot -------------------------------------------------#
     async def handle_markers(self, session: AgentSession, parsed):

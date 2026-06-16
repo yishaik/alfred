@@ -463,6 +463,7 @@ class AgentSession:
         self.connected = False
         self.busy = False
         self.mood.note_restart(crashed=True)   # next turn will be a touch careful
+        self.mgr.note_crash()                  # feeds auto-escalation (#8)
         delay, drop_resume = self.backoff.record()
         tail = "\n".join(list(self.stderr_tail)[-3:])
         note = f"⚠️ Claude exited. Restarting in {delay:.0f}s…"
