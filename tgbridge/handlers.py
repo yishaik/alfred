@@ -189,6 +189,36 @@ async def cmd_stop(update: Update, ctx):
     await (await _session(update, ctx)).interrupt()
 
 
+async def cmd_bg(update: Update, ctx):
+    """Run a task in the background on a dedicated worker agent, keeping the
+    main conversation free; the worker pings here when it's done (issue #18)."""
+    from .session import AgentConfig
+    m = mgr(ctx)
+    task = " ".join(ctx.args or []).strip()
+    if not task:
+        await update.message.reply_text(
+            "usage: /bg <task> — I'll work on it in the background (on a "
+            "separate 'bg' worker) and report back here when done, so this "
+            "chat stays free.")
+        return
+    # a dedicated worker agent, inheriting the active agent's cwd + model
+    if "bg" not in m.agents:
+        active = m.agents.get(m.active) or m.agents["main"]
+        m.agents["bg"] = AgentConfig(name="bg", workdir=active.workdir,
+                                     model=active.model)
+        m.save_agents()
+    worker = await m.session_for_agent("bg")
+    note = ("🔧 background task started — I'll keep this chat free and ping "
+            "when it's done."
+            if not worker.busy else
+            "🔧 queued behind the current background task.")
+    await update.message.reply_text(note)
+    await worker.feed(
+        f"[background task — runs independently of the main chat] {task}\n"
+        "When finished, end your reply with a one-line '✅ done: <summary>'.",
+        TurnSource())
+
+
 async def cmd_mute(update: Update, ctx):
     """Silence this route's output without closing the session (issue #19)."""
     s = await _session(update, ctx)
