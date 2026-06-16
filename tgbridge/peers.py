@@ -51,6 +51,44 @@ class PeerBus:
             self._server.close()
         await self._http.aclose()
 
+    async def _reachable(self, url: str, timeout: float = 3.0) -> bool:
+        """Cheap TCP connect to a peer's host:port — true if it accepts."""
+        from urllib.parse import urlparse
+        u = urlparse(url)
+        if not u.hostname:
+            return False
+        port = u.port or (443 if u.scheme == "https" else 80)
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(u.hostname, port), timeout=timeout)
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            return True
+        except Exception:
+            return False
+
+    async def diagnostics(self) -> str:
+        """Human-readable peer-bus health for the /peers command."""
+        lines = [f"🔌 𝗽𝗲𝗲𝗿 𝗯𝘂𝘀 — this bridge is '{PEER_NAME}'"]
+        if self._server:
+            lines.append(f"📡 listening on {PEER_BIND}:{PEER_PORT}")
+        elif PEER_PORT:
+            lines.append("⚠️ listener off (no BRIDGE_PEER_TOKEN)")
+        else:
+            lines.append("📡 listener off (inbound disabled)")
+        if not PEERS:
+            lines.append("no outbound peers configured (BRIDGE_PEERS)")
+            return "\n".join(lines)
+        results = await asyncio.gather(
+            *(self._reachable(url) for url in PEERS.values()))
+        lines.append(f"peers ({len(PEERS)}):")
+        for (name, url), ok in zip(PEERS.items(), results):
+            lines.append(f"  {'🟢' if ok else '🔴'} {name} — {url}")
+        return "\n".join(lines)
+
     async def send(self, peer: str, src_agent: str, text: str, hop: int) -> bool:
         url = PEERS.get(peer)
         if not url:

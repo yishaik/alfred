@@ -340,6 +340,17 @@ async def test_collect():
     check("collect restores mute state", s.outbox.muted is False)
 
 
+def test_workdir_safety():
+    from tgbridge.config import is_dangerous_workdir
+    check("blocks bare drive root", is_dangerous_workdir("C:\\"))
+    check("blocks windows dir", is_dangerous_workdir("C:\\Windows\\System32"))
+    check("blocks program files", is_dangerous_workdir("C:/Program Files/app"))
+    check("blocks UNC share", is_dangerous_workdir("\\\\server\\share"))
+    check("blocks empty", is_dangerous_workdir(""))
+    check("allows a real project dir",
+          not is_dangerous_workdir("D:\\Projects\\app"))
+
+
 def test_background_worker():
     # /bg spins up a worker agent inheriting the active agent's cwd + model,
     # and must auto-approve so a background task never stalls on a permission tap
@@ -736,6 +747,7 @@ if __name__ == "__main__":
     test_ratelimit()
     test_imports()
     test_session_pure()
+    test_workdir_safety()
     test_background_worker()
     test_mute()
     test_soul()

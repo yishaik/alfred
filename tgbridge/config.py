@@ -192,3 +192,24 @@ def save_json(path: Path, data) -> None:
 
 def authorized_chat(chat_id: int) -> bool:
     return chat_id == CHAT_ID or (GROUP_ID and chat_id == GROUP_ID)
+
+
+import re as _re
+
+_DANGEROUS_WORKDIRS = [
+    _re.compile(r"^[a-z]:[\\/]?$", _re.I),            # a bare drive root (C:\)
+    _re.compile(r"^[a-z]:[\\/]windows", _re.I),        # the Windows dir
+    _re.compile(r"^[a-z]:[\\/]program files", _re.I),  # Program Files
+]
+
+
+def is_dangerous_workdir(path: str) -> bool:
+    """True for paths an agent's cwd should never be set to: a network share,
+    a bare drive root, or a system directory. Pure — used to gate /cwd and
+    /newagent so a typo can't aim the agent at C:\\Windows."""
+    p = (path or "").strip().strip('"')
+    if not p:
+        return True
+    if p.startswith("\\\\") or p.startswith("//"):     # UNC / network share
+        return True
+    return any(rx.match(p) for rx in _DANGEROUS_WORKDIRS)
