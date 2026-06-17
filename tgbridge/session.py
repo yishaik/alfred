@@ -812,7 +812,10 @@ class AgentSession:
 
     # -- permissions / questions ----------------------------------------------#
     async def _can_use_tool(self, tool_name: str, tool_input: dict, ctx):
-        if tool_name == "AskUserQuestion":
+        # AskUserQuestion: handle here ONLY in approvals mode. In bypass mode the
+        # AssistantMessage handler renders it via _legacy_question; handling it
+        # here too delivered the question/answer twice (the duplicate-question bug).
+        if tool_name == "AskUserQuestion" and not self.cfg.auto_approve:
             answer = await self._ask_question(tool_input)
             return PermissionResultDeny(
                 message=f"[bridge] user answered: {answer}. This denial is the "
