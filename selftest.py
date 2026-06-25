@@ -198,8 +198,25 @@ def test_bridgetools_meta():
     check("bridge tool names", "mcp__bridge__send_file" in ALLOWED
           and len(ALLOWED) == len(TOOL_NAMES))
     check("memory tools exposed",
-          {"remember", "forget", "recall"} <= set(TOOL_NAMES)
+          {"remember", "forget", "recall", "kb_read"} <= set(TOOL_NAMES)
           and "mcp__bridge__remember" in ALLOWED)
+    check("fetch/route tools exposed",
+          {"fetch_content", "route_model"} <= set(TOOL_NAMES))
+
+
+def test_tracing():
+    from tgbridge import tracing
+    tracing._open.clear(); tracing._recent.clear()
+    check("empty trace render", "no tool calls" in tracing.render("s1"))
+    tracing.start("u1", "Bash", "ls -la")
+    tracing.finish("s1", "u1", "ok")
+    tracing.start("u2", "Edit", "app.py")
+    tracing.finish("s1", "u2", "error")
+    block = tracing.render("s1")
+    check("trace shows both tools", "Bash" in block and "Edit" in block)
+    check("trace marks ok + error", "✅" in block and "❌" in block)
+    check("finish unknown id is a no-op", tracing.finish("s1", "nope", "ok") is None)
+    check("span recorded per session", len(tracing._recent.get("s1", [])) == 2)
 
 
 def test_diffs():
@@ -268,43 +285,55 @@ def test_session_pure():
 
 
 def test_memory():
+    import shutil
+    import tempfile
     from tgbridge.memory import Memory
+    from tgbridge import napkin_store
 
-    m = Memory()
-    check("empty memory renders nothing", m.render_prompt() == "")
-    m.add("the user's name is Yishai", kind="pinned", now=100)
-    m.add("prefers terse replies", kind="note", now=101)
-    check("two items stored", len(m.items) == 2)
+    if not napkin_store.available():
+        check("napkin CLI available (npm i -g napkin-ai)", False)
+        return
 
-    # de-dupe on text; a repeat doesn't grow the list
-    m.add("prefers terse replies", kind="note", now=102)
-    check("dedupe keeps one", len(m.items) == 2)
-    # empty text is ignored
-    check("empty add ignored", m.add("   ") is None and len(m.items) == 2)
+    d = tempfile.mkdtemp(prefix="kb_test_")
+    try:
+        m = Memory(d)
+        check("empty memory renders nothing", m.render_prompt() == "")
 
-    # pinning an existing note upgrades its kind
-    m.add("prefers terse replies", kind="pinned", now=103)
-    pinned_texts = [it.text for it in m.items if it.kind == "pinned"]
-    check("note upgraded to pinned", "prefers terse replies" in pinned_texts)
+        m.add("the user's name is Yishai", kind="pinned", now=100)
+        m.add("prefers terse replies in the morning", kind="note", now=101)
+        check("two items stored", len(m.items) == 2)
 
-    # injection: pinned first, and a "remember" header present
-    block = m.render_prompt(now=200)
-    check("render has header", "WHAT YOU REMEMBER" in block)
-    check("pinned marked", "📌" in block)
+        # de-dupe on text; a repeat doesn't grow the store
+        m.add("prefers terse replies in the morning", kind="note", now=102)
+        check("dedupe keeps one", len(m.items) == 2)
+        # empty text is ignored
+        check("empty add ignored", m.add("   ") is None and len(m.items) == 2)
 
-    # search + forget by substring and by index
-    check("search finds", len(m.search("terse")) == 1)
-    removed = m.remove("Yishai")
-    check("forget by substring", removed and "Yishai" in removed)
-    check("one left", len(m.items) == 1)
-    check("forget bad index", m.remove("99") is None)
+        # injection: pinned in full under the header; the keyword map points the
+        # rest. The note's full sentence is NOT dumped (search-first).
+        block = m.render_prompt(now=200)
+        check("render has header", "WHAT YOU REMEMBER" in block)
+        check("pinned marked", "📌" in block)
+        check("pinned text injected", "Yishai" in block)
+        check("note not auto-injected",
+              "prefers terse replies in the morning" not in block)
 
-    # persistence roundtrip
-    m.add("likes Hebrew", kind="fact", now=300)
-    back = Memory.from_list(m.to_list())
-    check("memory roundtrip count", len(back.items) == len(m.items))
-    check("memory roundtrip kind",
-          any(it.kind == "pinned" for it in back.items))
+        # BM25 search finds the note
+        hits = m.search("terse replies")
+        check("search finds note", any("terse" in it.text for it in hits))
+
+        # forget the pinned fact by substring
+        removed = m.remove("Yishai")
+        check("forget by substring", bool(removed) and "Yishai" in removed)
+        check("one left", len(m.items) == 1)
+        check("forget bad index", m.remove("99") is None)
+
+        # forget the remaining note by 1-based index
+        idx = len(m.items)
+        check("forget by index", m.remove(str(idx)) is not None)
+        check("none left", len(m.items) == 0)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 async def test_collect():
@@ -551,43 +580,35 @@ def test_digest():
 
 
 def test_memory_decay():
-    from tgbridge.memory import (Memory, DECAY_DAYS, STALE_DAYS, SUMMARY_CHARS,
-                                 _DAY)
-    t0 = 1_000_000.0
+    """Decay is superseded: Napkin's search ranks by recency and only pinned
+    facts are injected, so decay() is a no-op. This pins down the surviving
+    contract — pinned injected in full, notes never auto-injected but always
+    searchable, regardless of age."""
+    import shutil
+    import tempfile
+    from tgbridge.memory import Memory
+    from tgbridge import napkin_store
 
-    m = Memory()
-    m.add("pinned thing", kind="pinned", now=t0)
-    m.add("a long-winded note " + "x" * 100, kind="note", now=t0)
-    m.add("short note", kind="note", now=t0)
+    if not napkin_store.available():
+        check("napkin CLI available (npm i -g napkin-ai)", False)
+        return
 
-    # nothing decays before the window
-    check("no early decay", m.decay(now=t0 + (DECAY_DAYS - 1) * _DAY) == 0)
+    d = tempfile.mkdtemp(prefix="kb_decay_")
+    try:
+        m = Memory(d)
+        m.add("pinned thing to always know", kind="pinned", now=1)
+        m.add("a long-winded note about waffles", kind="note", now=1)
 
-    # past the window, non-pinned notes collapse to summary; pinned is exempt
-    aged = t0 + (DECAY_DAYS + 1) * _DAY
-    check("two notes decayed", m.decay(now=aged) == 2)
-    kinds = {it.text[:6]: it.tier for it in m.items}
-    check("pinned stays full", kinds["pinned"] == "full")
-    check("note went summary", kinds["a long"] == "summary")
-    check("decay is idempotent", m.decay(now=aged) == 0)
+        check("decay is a no-op", m.decay(now=10 ** 12) == 0)
 
-    # a summarised long note is truncated in the prompt; pinned shown in full
-    block = m.render_prompt(now=aged)
-    check("summary truncated in prompt", "…" in block)
-    check("pinned still injected", "pinned thing" in block)
-
-    # very stale, non-pinned items drop OUT of injection but remain stored
-    stale = t0 + (STALE_DAYS + 1) * _DAY
-    block2 = m.render_prompt(now=stale)
-    check("stale note not injected", "short note" not in block2)
-    check("pinned survives staleness", "pinned thing" in block2)
-    check("stale item still stored", len(m.search("short note")) == 1)
-
-    # an explicit recall re-engages a faded item back to full
-    m.search("long-winded", now=stale)
-    revived = [it for it in m.items if it.text.startswith("a long")][0]
-    check("recall revives tier", revived.tier == "full")
-    check("recall refreshes recency", revived.last_used == stale)
+        block = m.render_prompt()
+        check("pinned injected", "pinned thing to always know" in block)
+        check("note not auto-injected",
+              "a long-winded note about waffles" not in block)
+        check("note still searchable",
+              any("waffle" in it.text for it in m.search("waffles")))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def test_voice_picker():
@@ -817,6 +838,7 @@ if __name__ == "__main__":
     test_job_retry_on_failure()
     test_metrics()
     test_bridgetools_meta()
+    test_tracing()
     test_diffs()
     test_transcript_search()
     test_ratelimit()

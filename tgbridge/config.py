@@ -58,6 +58,18 @@ def _load_env(path: Path) -> None:
 
 _load_env(ROOT / ".env")
 
+# The Claude Agent SDK derives the `initialize` handshake timeout from this env
+# var read out of OUR process's environment (claude_agent_sdk/client.py reads
+# os.environ — NOT the per-session ClaudeAgentOptions.env, which only reaches
+# the subprocess). A cold-start claude.exe (freshly extracted after a reboot,
+# resuming a large session) can take well over the 60s default to answer
+# `initialize`; that surfaced as recurring "Control request timeout: initialize"
+# start failures. Set it here so the handshake actually gets the headroom; the
+# session also forwards the same value to the subprocess. setdefault keeps any
+# real env / .env override the user set.
+CLAUDE_INIT_TIMEOUT_MS = os.environ.setdefault(
+    "CLAUDE_CODE_STREAM_CLOSE_TIMEOUT", "180000")
+
 
 def _try_keyring(name: str) -> str:
     try:
@@ -169,7 +181,8 @@ SESSIONS_FILE = STATE_DIR / "sessions.json"
 JOBS_FILE = STATE_DIR / "jobs.json"
 COSTS_FILE = STATE_DIR / "costs.json"
 TOPICS_FILE = STATE_DIR / "topics.json"
-MEMORY_FILE = STATE_DIR / "memory.json"          # {agent: [memory items]}
+MEMORY_FILE = STATE_DIR / "memory.json"          # legacy flat store (migrated)
+KB_DIR = STATE_DIR / "kb"                        # per-agent Napkin vaults: kb/<agent>/
 WATCHERS_FILE = STATE_DIR / "watchers.json"      # passive-watcher targets
 TODOS_FILE = STATE_DIR / "todos.json"            # the /todo Kanban list
 EXPENSES_FILE = STATE_DIR / "expenses.json"      # the /expense ledger

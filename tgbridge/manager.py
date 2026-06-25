@@ -15,7 +15,7 @@ from datetime import date, datetime, timedelta
 
 from . import metrics
 from .config import (AGENTS_FILE, BACKUP_DIR, CHAT_ID, COSTS_FILE, DIGEST_TIME,
-                     DREAM_TIME, ESCALATE_MINUTES, HEALTH_TIME,
+                     DREAM_TIME, ESCALATE_MINUTES, HEALTH_TIME, KB_DIR,
                      LEGACY_SESSION_FILE, MAX_HOPS, MEMORY_FILE,
                      MONTHLY_BUDGET_USD, PAIR_MSGS_PER_5MIN,
                      PROACTIVE_IDLE_HOURS, PROACTIVE_QUIET_END,
@@ -62,9 +62,11 @@ class AgentManager:
         self._migrate_legacy()
         self.topics: dict[str, str] = load_json(TOPICS_FILE, {})  # thread_id -> agent
         self.costs: dict[str, float] = load_json(COSTS_FILE, {})
-        raw_mem = load_json(MEMORY_FILE, {})
-        self.memories: dict[str, Memory] = {
-            name: Memory.from_list(items) for name, items in raw_mem.items()}
+        # Long-term memory is now a per-agent Napkin vault (state/kb/<agent>/),
+        # built lazily on first use and cached here. A one-time migration drains
+        # the legacy flat memory.json into the vaults.
+        self.memories: dict[str, Memory] = {}
+        self._migrate_memory_json()
         self.watchers: list[Watcher] = [
             Watcher.from_dict(d) for d in load_json(WATCHERS_FILE, [])]
         self.todos: TodoList = TodoList.from_dict(load_json(TODOS_FILE, {}))
@@ -114,16 +116,40 @@ class AgentManager:
         save_json(TOPICS_FILE, self.topics)
 
     def memory_for(self, agent: str) -> Memory:
-        """The (lazily-created) long-term memory for an agent."""
+        """The (lazily-created) long-term memory for an agent, backed by its own
+        Napkin vault at state/kb/<agent>/."""
         mem = self.memories.get(agent)
         if mem is None:
-            mem = self.memories[agent] = Memory()
+            mem = self.memories[agent] = Memory(str(KB_DIR / agent))
         return mem
 
     def save_memory(self):
-        save_json(MEMORY_FILE, {name: mem.to_list()
-                                for name, mem in self.memories.items()
-                                if mem.items})
+        """No-op: the Napkin vault is written through immediately on every
+        add/forget. Kept so existing callers stay valid."""
+        return
+
+    def _migrate_memory_json(self):
+        """One-time import of the legacy flat state/memory.json ({agent: [items]})
+        into per-agent Napkin vaults, then retire the file so it never re-imports.
+        Safe to call on every boot — does nothing once the file is gone."""
+        if not MEMORY_FILE.exists():
+            return
+        raw = load_json(MEMORY_FILE, {})
+        migrated = 0
+        for agent, items in (raw or {}).items():
+            for it in (items or []):
+                text = (it or {}).get("text", "").strip()
+                if not text:
+                    continue
+                self.memory_for(agent).add(text, kind=(it.get("kind") or "fact"))
+                migrated += 1
+        try:
+            MEMORY_FILE.rename(MEMORY_FILE.with_name("memory.json.imported"))
+        except OSError:
+            log.exception("could not retire memory.json after migration")
+        if migrated:
+            log.info("migrated %d memory item(s) from memory.json into vaults",
+                     migrated)
 
     def save_watchers(self):
         save_json(WATCHERS_FILE, [w.to_dict() for w in self.watchers])

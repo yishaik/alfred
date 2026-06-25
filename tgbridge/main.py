@@ -52,6 +52,8 @@ BOT_COMMANDS = [
     ("costs", "cost + tool-activity breakdown"),
     ("watch", "watch a path/repo for changes"),
     ("audit", "recent tool calls"),
+    ("trace", "tool-call timeline (durations + ok/error)"),
+    ("brief", "morning brief on demand"),
     ("logs", "recent warnings/errors"),
     ("restart", "restart Claude (resumes)"),
 ]
@@ -222,6 +224,8 @@ def main():
         "unwatch": handlers.cmd_unwatch,
         "peers": handlers.cmd_peers,
         "audit": handlers.cmd_audit,
+        "trace": handlers.cmd_trace,
+        "brief": handlers.cmd_brief,
         "logs": handlers.cmd_logs,
     }
     for name, fn in cmds.items():

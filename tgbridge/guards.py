@@ -14,7 +14,7 @@ import time
 
 from claude_agent_sdk import HookMatcher
 
-from . import metrics
+from . import metrics, tracing
 from .config import (AUDIT_FILE, EXTRA_DANGER_PATTERNS, PERMISSION_TIMEOUT,
                      SHOW_DIFFS)
 from .fmt import summarize_tool
@@ -134,6 +134,7 @@ def build_hooks(session) -> dict:
     async def pre_tool_use(input_data, tool_use_id, context):
         tool = input_data.get("tool_name", "?")
         tool_input = input_data.get("tool_input") or {}
+        tracing.start(tool_use_id, tool, summarize_tool(tool, tool_input))
         matched = is_dangerous(tool, tool_input)
         if not matched:
             audit(session.cfg.name, session.skey, tool, tool_input)
@@ -158,6 +159,17 @@ def build_hooks(session) -> dict:
             }
         }
 
+    async def post_trace(input_data, tool_use_id, context):
+        """Close the trace span for every tool, recording ok/error outcome."""
+        try:
+            resp = input_data.get("tool_response")
+            errored = (isinstance(resp, dict) and (resp.get("is_error") or resp.get("isError"))) \
+                or (isinstance(resp, str) and resp.strip().lower().startswith("error"))
+            tracing.finish(session.skey, tool_use_id, "error" if errored else "ok")
+        except Exception:
+            log.exception("trace finish failed")
+        return {}
+
     async def post_tool_use(input_data, tool_use_id, context):
         try:
             diff = render_diff(input_data.get("tool_name", ""),
@@ -172,9 +184,11 @@ def build_hooks(session) -> dict:
         # generous timeout: a human has to find their phone
         "PreToolUse": [HookMatcher(matcher=None, hooks=[pre_tool_use],
                                    timeout=PERMISSION_TIMEOUT + 60)],
+        # trace EVERY tool's outcome + duration (concept #19)
+        "PostToolUse": [HookMatcher(matcher=None, hooks=[post_trace], timeout=30)],
     }
     if SHOW_DIFFS:
-        hooks["PostToolUse"] = [HookMatcher(
+        hooks["PostToolUse"].append(HookMatcher(
             matcher="Edit|MultiEdit|Write|NotebookEdit",
-            hooks=[post_tool_use], timeout=30)]
+            hooks=[post_tool_use], timeout=30))
     return hooks

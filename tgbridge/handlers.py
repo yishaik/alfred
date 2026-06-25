@@ -707,6 +707,20 @@ async def cmd_peers(update: Update, ctx):
     await update.message.reply_text(await m.peers.diagnostics())
 
 
+async def cmd_trace(update: Update, ctx):
+    """This session's recent tool-call timeline — duration + ok/error (#19)."""
+    from . import tracing
+    s = await _session(update, ctx)
+    await update.message.reply_text(tracing.render(s.skey))
+
+
+async def cmd_brief(update: Update, ctx):
+    """On-demand morning brief — Second Brain overnight + open tasks + recap + agenda."""
+    import time as _time
+    from .dream import dream_brief
+    await update.message.reply_text(dream_brief(mgr(ctx), _time.time()))
+
+
 async def cmd_audit(update: Update, ctx):
     """Last entries of the tool-call audit trail (state/audit.jsonl)."""
     import json as _json

@@ -1,188 +1,276 @@
 """Long-term memory for an agent — what it carries between sessions.
 
 A session is ephemeral; the conversation scrolls away and a /clear or a crash
-wipes the working context. Memory is the durable layer underneath: a small,
-curated set of things worth remembering, persisted per agent and injected back
-into every fresh session so the agent recalls them without anyone running
-/find.
+wipes the working context. Memory is the durable layer underneath, injected
+back into every fresh session so the agent recalls things without anyone
+searching.
 
-Items have a kind, which decides how they're treated:
-  * pinned — the user explicitly said "remember this". Never decays, always
-             injected. The backbone of "always know that X".
-  * note   — the agent jotted something down itself (secretary notes, an
-             observation). Subject to decay over time (see memory_decay, #11).
-  * fact   — a neutral middle ground for imported/curated knowledge (#14).
+The store underneath is a per-agent **Napkin** knowledge vault (local-first
+markdown, BM25 search, progressive disclosure) rather than a flat JSON list.
+This module is a thin facade that keeps the public surface the rest of the
+bridge already calls — add / remove / search / render_prompt / render_list /
+decay / .items — so handlers, the MCP tools, the digest and the manager are
+unaffected by what backs it.
 
-This module is the store + rendering; the persistence wiring lives on the
-manager, the user commands in handlers, and the agent-facing remember/forget
-tools come later. The pure logic here (add/dedupe/remove/search/render) is
-unit-tested.
+Vault layout (state/kb/<agent>/):
+  * NAPKIN.md         — the always-injected Level-0 context note. Pinned facts
+                        ("remember this — always know X") live in a managed
+                        block here and are injected verbatim every session.
+  * notes/<slug>.md   — notes/facts the agent jotted down. NOT injected;
+                        surfaced on demand via BM25 search (the recall tool).
+  * .napkin/          — Napkin's own index metadata (like .git).
+
+Item kinds decide treatment:
+  * pinned — always injected (NAPKIN.md block). The backbone of "always know X".
+  * note   — the agent's own observation; searched on demand, never injected.
+  * fact   — imported/curated knowledge; treated like a note.
+
+Pinned CRUD edits NAPKIN.md directly (plain file IO — fast, no subprocess).
+Notes go through the napkin CLI (tgbridge.napkin_store). render_prompt is the
+only hot path that shells out (for the TF-IDF overview map); it is cached and
+invalidated on every write.
 """
 
+import hashlib
+import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from pathlib import Path
+
+from . import napkin_store
 
 KINDS = ("pinned", "note", "fact")
 
-# How much memory may flow into a prompt, so recall never crowds out the task.
+# How much pinned memory may flow into a prompt, so recall never crowds the task.
 MAX_INJECT_ITEMS = 30
 MAX_INJECT_CHARS = 2000
 
-# Decay (issue #11) — old, unengaged memory fades from the prompt without being
-# deleted. Pinned items are exempt. "Engagement" means an explicit recall or a
-# re-add, NOT passive auto-injection, so genuinely idle memories age out.
-_DAY = 86400.0
-DECAY_DAYS = 14            # unused this long: full text collapses to a summary
-STALE_DAYS = 60           # unused this long: dropped from auto-injection (kept,
-                          #   still searchable via recall)
-SUMMARY_CHARS = 80        # how short a summarised item reads in the prompt
+# Markers delimiting the managed pinned block inside NAPKIN.md.
+PIN_START = "<!-- alfred:pinned:start -->"
+PIN_END = "<!-- alfred:pinned:end -->"
 
 
 @dataclass
 class MemoryItem:
+    """A single remembered thing, as surfaced by the facade. Lightweight — the
+    durable form lives in the vault (NAPKIN.md bullet or notes/<slug>.md)."""
     text: str
-    kind: str = "fact"
+    kind: str = "fact"          # pinned | note | fact
+    file: str = ""              # vault-relative path (notes only; "" for pinned)
     created: float = 0.0        # epoch seconds; 0 -> stamped on add
-    last_used: float = 0.0      # last time it was recalled/injected
-    tier: str = "full"          # full | summary (decay collapses full->summary)
 
-    def to_dict(self) -> dict:
-        return {"text": self.text, "kind": self.kind, "created": self.created,
-                "last_used": self.last_used, "tier": self.tier}
 
-    @classmethod
-    def from_dict(cls, d: dict) -> "MemoryItem":
-        return cls(text=d.get("text", ""), kind=d.get("kind", "fact"),
-                   created=d.get("created", 0.0),
-                   last_used=d.get("last_used", 0.0),
-                   tier=d.get("tier", "full"))
+def _slug(text: str) -> str:
+    """A short, deterministic, filesystem-safe slug for a note. The trailing
+    hash of the normalised text makes the same fact map to the same file, so a
+    repeat `add` dedupes naturally (create-then-exists is treated as success)."""
+    words = re.sub(r"[^\w\s-]", "", text.lower(), flags=re.UNICODE).split()
+    stem = "-".join(words[:6])[:48] or "note"
+    h = hashlib.sha1(text.strip().lower().encode("utf-8")).hexdigest()[:6]
+    return f"{stem}-{h}"
 
 
 class Memory:
-    def __init__(self, items: list | None = None):
-        self.items: list[MemoryItem] = items or []
+    """An agent's long-term memory, backed by a Napkin vault at `vault`."""
+
+    def __init__(self, vault: str):
+        self.vault = str(vault)
+        napkin_store.ensure_vault(self.vault)   # cheap if it already exists
+        self._prompt_cache: str | None = None   # render_prompt result; None = stale
+
+    @property
+    def _napkin_md(self) -> Path:
+        return Path(self.vault) / "NAPKIN.md"
+
+    @property
+    def _notes_dir(self) -> Path:
+        return Path(self.vault) / "notes"
+
+    # -- pinned block (direct NAPKIN.md IO) ---------------------------------- #
+    def _read_text(self) -> str:
+        try:
+            return self._napkin_md.read_text(encoding="utf-8")
+        except OSError:
+            return ""
+
+    def _read_pinned(self) -> list[str]:
+        """The pinned bullets currently in NAPKIN.md's managed block."""
+        text = self._read_text()
+        if PIN_START not in text:
+            return []
+        block = text.split(PIN_START, 1)[1].split(PIN_END, 1)[0]
+        out = []
+        for line in block.splitlines():
+            line = line.strip()
+            if line.startswith("- "):
+                out.append(line[2:].strip())
+        return out
+
+    def _write_pinned(self, bullets: list[str]) -> None:
+        """Rewrite the managed pinned block, creating it (and NAPKIN.md) if
+        absent. Everything outside the markers is preserved verbatim."""
+        body = "\n".join(f"- {b}" for b in bullets)
+        block = f"{PIN_START}\n## Pinned\n{body}\n{PIN_END}"
+        text = self._read_text()
+        if PIN_START in text and PIN_END in text:
+            head, rest = text.split(PIN_START, 1)
+            _, tail = rest.split(PIN_END, 1)
+            text = head + block + tail
+        else:
+            sep = "" if text.endswith("\n") or not text else "\n\n"
+            text = (text + sep + "\n" + block + "\n") if text else block + "\n"
+        try:
+            self._napkin_md.write_text(text, encoding="utf-8")
+        except OSError:
+            pass
+        self._prompt_cache = None
 
     # -- mutation ------------------------------------------------------------ #
     def add(self, text: str, kind: str = "fact", now: float | None = None) -> MemoryItem | None:
-        """Add an item, de-duplicating on (normalised text). Returns the item,
-        or None for empty text. A repeat add refreshes the existing item's
-        recency and upgrades a note to pinned if asked."""
+        """Add an item. Pinned facts go to NAPKIN.md; notes/facts become vault
+        files. De-duplicates on normalised text. Returns the item, or None for
+        empty text."""
         text = (text or "").strip()
         if not text:
             return None
         if kind not in KINDS:
             kind = "fact"
         now = time.time() if now is None else now
-        key = text.lower()
-        for it in self.items:
-            if it.text.lower() == key:
-                it.last_used = now
-                it.tier = "full"          # re-adding re-engages: undo any decay
-                if kind == "pinned":      # pinning an existing note sticks it
-                    it.kind = "pinned"
-                return it
-        item = MemoryItem(text=text, kind=kind, created=now, last_used=now)
-        self.items.append(item)
-        return item
+        if kind == "pinned":
+            bullets = self._read_pinned()
+            if not any(b.lower() == text.lower() for b in bullets):
+                bullets.append(text)
+                self._write_pinned(bullets)
+            return MemoryItem(text=text, kind="pinned", created=now)
+        slug = _slug(text)
+        path = f"notes/{slug}.md"
+        try:
+            path = napkin_store.create(self.vault, f"notes/{slug}", text) or path
+        except napkin_store.NapkinError:
+            pass   # already exists (same text) -> already remembered
+        self._prompt_cache = None
+        return MemoryItem(text=text, kind=kind, file=path, created=now)
 
     def remove(self, ref: str) -> str | None:
-        """Forget an item by 1-based index ("3") or by case-insensitive
-        substring. Returns the removed text, or None if nothing matched."""
+        """Forget an item by 1-based index (matching render_list order) or by
+        case-insensitive substring. Returns the removed text, or None."""
         ref = (ref or "").strip()
         if not ref:
             return None
+        items = self.items
         if ref.lstrip("#").isdigit():
             i = int(ref.lstrip("#")) - 1
-            if 0 <= i < len(self.items):
-                return self.items.pop(i).text
+            if 0 <= i < len(items):
+                return self._delete(items[i])
             return None
         low = ref.lower()
-        for i, it in enumerate(self.items):
+        for it in items:
             if low in it.text.lower():
-                return self.items.pop(i).text
+                return self._delete(it)
         return None
+
+    def _delete(self, it: MemoryItem) -> str:
+        if it.kind == "pinned":
+            kept = [b for b in self._read_pinned() if b.lower() != it.text.lower()]
+            self._write_pinned(kept)
+        else:
+            try:
+                napkin_store.delete(self.vault, it.file or it.text)
+            except napkin_store.NapkinError:
+                pass
+        self._prompt_cache = None
+        return it.text
 
     # -- queries ------------------------------------------------------------- #
     def search(self, query: str, now: float | None = None) -> list[MemoryItem]:
-        low = (query or "").lower().strip()
-        now = time.time() if now is None else now
-        hits = self.items if not low else \
-            [it for it in self.items if low in it.text.lower()]
-        for it in hits:                  # an explicit recall re-engages an item
-            it.last_used = now
-            if it.kind != "pinned":
-                it.tier = "full"
-        return list(hits)
+        """BM25 search over notes (+ substring over pinned). Empty query returns
+        everything, matching the old behaviour."""
+        low = (query or "").strip()
+        if not low:
+            return self.items
+        out: list[MemoryItem] = []
+        for b in self._read_pinned():               # pinned first, always matchable
+            if low.lower() in b.lower():
+                out.append(MemoryItem(text=b, kind="pinned"))
+        try:
+            for r in napkin_store.search(self.vault, low):
+                snip = " ".join(s.get("text", "") for s in r.get("snippets", []))
+                out.append(MemoryItem(text=(snip.strip() or r.get("file", "")),
+                                      kind="note", file=r.get("file", "")))
+        except napkin_store.NapkinError:
+            pass
+        return out
 
-    # -- decay (issue #11) --------------------------------------------------- #
+    # -- decay (superseded) -------------------------------------------------- #
     def decay(self, now: float | None = None) -> int:
-        """Age unengaged, non-pinned memory: full -> summary after DECAY_DAYS of
-        no use. Nothing is deleted (staleness only hides items from injection,
-        in render_prompt). Returns how many items newly collapsed to summary."""
-        now = time.time() if now is None else now
-        changed = 0
-        for it in self.items:
-            if it.kind == "pinned" or it.tier != "full":
-                continue
-            if now - it.last_used > DECAY_DAYS * _DAY:
-                it.tier = "summary"
-                changed += 1
-        return changed
+        """No-op: Napkin's BM25 search already ranks by recency, and only pinned
+        facts are injected, so there is nothing to fade. Kept so the manager's
+        daily maintenance call stays valid."""
+        return 0
 
-    def _ordered(self) -> list[MemoryItem]:
-        """Pinned first, then most-recently-used — the order both injection and
-        the listing use."""
-        return sorted(self.items,
-                      key=lambda it: (it.kind != "pinned", -it.last_used))
+    # -- listing / rendering ------------------------------------------------- #
+    @property
+    def items(self) -> list[MemoryItem]:
+        """Everything remembered: pinned bullets then notes (by name). Reads the
+        vault from disk, so callers should treat it as a snapshot, not a live
+        list."""
+        out = [MemoryItem(text=b, kind="pinned") for b in self._read_pinned()]
+        if self._notes_dir.is_dir():
+            for p in sorted(self._notes_dir.glob("*.md")):
+                try:
+                    txt = p.read_text(encoding="utf-8").strip()
+                except OSError:
+                    txt = p.stem
+                out.append(MemoryItem(text=txt or p.stem, kind="note",
+                                      file=f"notes/{p.name}"))
+        return out
 
-    # -- rendering ----------------------------------------------------------- #
     def render_prompt(self, now: float | None = None) -> str:
-        """A compact block injected into a fresh session so the agent recalls
-        what matters. Empty when there's nothing to say.
-
-        Decay shapes what's shown (it does NOT mark items used — passive
-        injection isn't engagement, or nothing would ever age):
-          * pinned items: always shown in full
-          * stale items (unused > STALE_DAYS): hidden from injection but kept
-          * summary-tier items: truncated to SUMMARY_CHARS so they fade quietly
-        """
-        if not self.items:
-            return ""
-        now = time.time() if now is None else now
-        lines, used = [], 0
-        for it in self._ordered()[:MAX_INJECT_ITEMS]:
-            if it.kind != "pinned" and now - it.last_used > STALE_DAYS * _DAY:
-                continue                 # too stale to inject (still recallable)
-            text = it.text
-            if it.tier == "summary" and len(text) > SUMMARY_CHARS:
-                text = text[:SUMMARY_CHARS].rstrip() + "…"
-            tag = "📌" if it.kind == "pinned" else "·"
-            line = f"{tag} {text}"
-            if used + len(line) > MAX_INJECT_CHARS:
-                break
-            lines.append(line)
-            used += len(line)
-        if not lines:
-            return ""
-        return ("WHAT YOU REMEMBER (carried from earlier sessions — treat as "
+        """Search-first injection (progressive disclosure). A fresh session gets
+        only the always-on layer: pinned facts in full, plus Napkin's keyword
+        map of the rest so the agent knows what it can `recall`. The bulk of the
+        vault is pulled on demand, never dumped. Cached; invalidated on write."""
+        if self._prompt_cache is not None:
+            return self._prompt_cache
+        blocks: list[str] = []
+        pinned = self._read_pinned()
+        if pinned:
+            lines, used = [], 0
+            for b in pinned[:MAX_INJECT_ITEMS]:
+                line = f"📌 {b}"
+                if used + len(line) > MAX_INJECT_CHARS:
+                    break
+                lines.append(line)
+                used += len(line)
+            blocks.append(
+                "WHAT YOU REMEMBER (carried from earlier sessions — treat as "
                 "background you already know, don't re-announce it):\n"
                 + "\n".join(lines))
+        try:
+            overview = napkin_store.overview(self.vault).get("overview", [])
+        except napkin_store.NapkinError:
+            overview = []
+        folders = [o for o in overview if o.get("notes")]
+        if folders:
+            map_lines = []
+            for o in folders:
+                kws = ", ".join(o.get("keywords", [])[:8])
+                map_lines.append(f"• {o.get('path', '/')} ({o['notes']}): {kws}")
+            blocks.append(
+                "LONG-TERM MEMORY MAP (your knowledge vault — search it with the "
+                "`recall` tool and read a file with `kb_read` whenever a topic "
+                "might already be known, before asking the user to repeat "
+                "themselves):\n" + "\n".join(map_lines))
+        self._prompt_cache = "\n\n".join(blocks)
+        return self._prompt_cache
 
     def render_list(self) -> str:
         """Human-readable, numbered — for the /memory command."""
-        if not self.items:
+        items = self.items
+        if not items:
             return "🧠 nothing remembered yet. /remember <text> to pin something."
-        out = [f"🧠 {len(self.items)} remembered:"]
-        for i, it in enumerate(self._ordered(), 1):
-            tag = "📌" if it.kind == "pinned" else ("📝" if it.kind == "note" else "•")
-            faded = " ·faded" if it.tier == "summary" else ""
-            out.append(f"{i}. {tag} {it.text}{faded}")
+        out = [f"🧠 {len(items)} remembered:"]
+        for i, it in enumerate(items, 1):
+            tag = "📌" if it.kind == "pinned" else "📝"
+            out.append(f"{i}. {tag} {it.text[:200]}")
         return "\n".join(out)
-
-    # -- persistence --------------------------------------------------------- #
-    def to_list(self) -> list:
-        return [it.to_dict() for it in self.items]
-
-    @classmethod
-    def from_list(cls, data: list | None) -> "Memory":
-        return cls([MemoryItem.from_dict(d) for d in (data or [])])

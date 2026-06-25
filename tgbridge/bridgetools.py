@@ -5,17 +5,25 @@ proper tool calls: schemas, validation, and immediate success/error feedback
 to Claude. One server instance is built per session so handlers close over it.
 """
 
+import asyncio
 import logging
 from typing import Annotated
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
+from . import napkin_store
+
 log = logging.getLogger("bridge.tools")
+
+# x-reader's Node CLI tools (content fetcher + Gemma model router) shelled out by
+# the fetch_content / route_model tools below.
+XREADER_DIR = r"D:\Projects\x-reader"
 
 SERVER_NAME = "bridge"
 TOOL_NAMES = ["send_file", "send_buttons", "message_agent",
               "schedule", "unschedule", "list_jobs",
-              "remember", "forget", "recall"]
+              "remember", "forget", "recall", "kb_read",
+              "fetch_content", "route_model"]
 # fully-qualified names for allowed_tools
 ALLOWED = [f"mcp__{SERVER_NAME}__{t}" for t in TOOL_NAMES]
 
@@ -25,6 +33,27 @@ def _text(msg: str, err: bool = False) -> dict:
     if err:
         out["is_error"] = True
     return out
+
+
+async def _run_node(script: str, *script_args: str, timeout: float = 90.0) -> tuple[str, int]:
+    """Run one of x-reader's Node CLIs and return (combined output, returncode).
+    Never raises — OSError/timeout are folded into a non-zero code + message so
+    the calling tool degrades gracefully."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "node", script, *script_args, cwd=XREADER_DIR,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    except OSError as e:
+        return (f"couldn't launch node: {e}", 1)
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        return (f"{script} timed out after {int(timeout)}s", 1)
+    return ((out or b"").decode("utf-8", "replace").strip(), proc.returncode or 0)
 
 
 def build_bridge_server(session):
@@ -135,18 +164,64 @@ def build_bridge_server(session):
         mgr.save_memory()
         return _text(f"forgotten: {removed[:120]}")
 
-    @tool("recall", "Search your long-term memory. Empty query returns "
-          "everything. Use to check what you already know before asking the "
-          "user to repeat themselves.",
-          {"query": Annotated[str, "substring to search for (optional)"]})
+    @tool("recall", "Search your long-term memory vault (BM25 + recency). Empty "
+          "query returns everything. Use to check what you already know before "
+          "asking the user to repeat themselves. Results show a snippet and, "
+          "for notes, the file path — read the full file with `kb_read`.",
+          {"query": Annotated[str, "what to search for (optional)"]})
     async def recall(args):
         hits = mgr.memory_for(session.cfg.name).search(str(args.get("query", "")))
         if not hits:
             return _text("(nothing remembered yet)")
-        return _text("\n".join(f"[{it.kind}] {it.text}" for it in hits[:40]))
+        lines = [f"[{it.kind}] {it.text}"
+                 + (f"  (file: {it.file})" if it.file else "")
+                 for it in hits[:40]]
+        return _text("\n".join(lines))
+
+    @tool("kb_read", "Read the full text of one file from your long-term memory "
+          "vault, by the path shown in a `recall` result (e.g. "
+          "'notes/foo.md'). Use when a recall snippet isn't the whole story.",
+          {"file": Annotated[str, "vault-relative path from a recall result"]})
+    async def kb_read(args):
+        name = str(args.get("file", "")).strip()
+        if not name:
+            return _text("file is required", err=True)
+        vault = mgr.memory_for(session.cfg.name).vault
+        try:
+            content = napkin_store.read(vault, name)
+        except napkin_store.NapkinError as e:
+            return _text(f"couldn't read {name}: {e}", err=True)
+        return _text(content or "(empty or not found)")
+
+    @tool("fetch_content", "Fetch the FULL content of a tweet or web article that "
+          "normal web fetch can't read (X/Twitter posts, JS-heavy pages) — uses a "
+          "headless browser with the saved X login. Pulls the whole thread, "
+          "images, links, and linked X Articles, and auto-saves everything to the "
+          "Second Brain. Pass a tweet URL/id or any article URL.",
+          {"url": Annotated[str, "tweet URL/id or article URL"]})
+    async def fetch_content(args):
+        url = str(args.get("url", "")).strip()
+        if not url:
+            return _text("url is required", err=True)
+        # --save: every fetch lands in the Second Brain automatically.
+        out, rc = await _run_node("fetch.mjs", url, "--save", timeout=120.0)
+        return _text(out[:6000] or "(no content)", err=(rc != 0))
+
+    @tool("route_model", "Ask the local Gemma model-router which AI model best fits "
+          "a task (gemini=content/visuals, claude-code=code, claude=logic/analysis, "
+          "gpt=images/personal, grok=facts/current-events). Returns the recommended "
+          "model and a short reason.",
+          {"task": Annotated[str, "the task to route to a model"]})
+    async def route_model(args):
+        task = str(args.get("task", "")).strip()
+        if not task:
+            return _text("task is required", err=True)
+        out, rc = await _run_node("route.mjs", task, timeout=180.0)
+        return _text(out or "(no result)", err=(rc != 0))
 
     return create_sdk_mcp_server(
         name=SERVER_NAME, version="1.0.0",
         tools=[send_file, send_buttons, message_agent,
                schedule, unschedule, list_jobs,
-               remember, forget, recall])
+               remember, forget, recall, kb_read,
+               fetch_content, route_model])

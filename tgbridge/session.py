@@ -30,9 +30,9 @@ from . import bridgetools, guards, markers, voice
 import os
 
 from . import metrics
-from .config import (BOT_TURNS_PER_HOUR, CHAT_ID, CLAUDE_BIN, CONTEXT_WARN_PCT,
-                     MODEL, PERMISSION_TIMEOUT, TMP_DIR, TURN_WARN_SECONDS,
-                     WORKDIR)
+from .config import (BOT_TURNS_PER_HOUR, CHAT_ID, CLAUDE_BIN,
+                     CLAUDE_INIT_TIMEOUT_MS, CONTEXT_WARN_PCT, MODEL,
+                     PERMISSION_TIMEOUT, TMP_DIR, TURN_WARN_SECONDS, WORKDIR)
 from .fmt import (SEP, fmt_duration, format_error, format_output,
                   format_tool_lines, summarize_tool, tool_icon)
 from .mood import Mood
@@ -115,12 +115,15 @@ line at the END of the reply) still work, but prefer the tools.
 RECEIVING FILES: when the user sends a photo/file/voice note, the bridge saves it \
 and tells you the path (voice notes arrive pre-transcribed). Use Read on the path.
 
-MEMORY (mcp__bridge__remember / recall / forget): you carry long-term memory \
-across sessions. Anything under "WHAT YOU REMEMBER" below was saved earlier — \
-treat it as known. When you learn a durable fact about the user or the work \
-(a preference, a decision, an open loop, a contact), save it with `remember`; \
-`recall` before asking the user to repeat something; `forget` what's wrong or \
-done. Save sparingly and only what's worth carrying — not transient chatter."""
+MEMORY (mcp__bridge__remember / recall / forget / kb_read): you carry long-term \
+memory across sessions in a searchable knowledge vault. Anything under "WHAT YOU \
+REMEMBER" below was saved earlier — treat it as known; the "LONG-TERM MEMORY MAP" \
+is a keyword index of the rest. When you learn a durable fact about the user or \
+the work (a preference, a decision, an open loop, a contact), save it with \
+`remember` (kind 'pinned' for must-always-know, else 'note'); `recall <query>` \
+searches the vault and `kb_read <file>` opens a full note — do this before asking \
+the user to repeat something; `forget` what's wrong or done. Save sparingly and \
+only what's worth carrying — not transient chatter."""
 
 SECRETARY_PROMPT = """
 SECRETARY MODE is ON. You are also the user's personal secretary:
@@ -296,9 +299,12 @@ class AgentSession:
             stderr=self.stderr_tail.append,
             # keep the claude subprocess off the (possibly full) system drive;
             # give the init handshake extra headroom so a cold-start claude.exe
-            # (freshly extracted after a reboot) doesn't trip the 60s default
+            # (freshly extracted after a reboot) doesn't trip the 60s default.
+            # NB: this env reaches the *subprocess*; the SDK reads the same var
+            # from our own os.environ for the handshake timeout — config.py sets
+            # it there too, which is what actually extends the 60s init window.
             env={"TEMP": str(TMP_DIR), "TMP": str(TMP_DIR),
-                 "CLAUDE_CODE_STREAM_CLOSE_TIMEOUT": "180000"},
+                 "CLAUDE_CODE_STREAM_CLOSE_TIMEOUT": CLAUDE_INIT_TIMEOUT_MS},
         )
 
     def _ensure_workdir(self):
@@ -322,7 +328,21 @@ class AgentSession:
         self.outbox.start()
         self._ensure_workdir()
         self.client = ClaudeSDKClient(self._options(fork=fork))
-        await self.client.connect()
+        try:
+            await self.client.connect()
+        except BaseException:
+            # connect() can spawn the claude.exe subprocess and then fail the
+            # init handshake (e.g. "Control request timeout: initialize"). Tear
+            # the half-open client down here, or the next start() retry would
+            # overwrite self.client and orphan that subprocess. BaseException so
+            # a cancelled/timed-out connect is cleaned up too.
+            try:
+                await self.client.disconnect()
+            except Exception:
+                pass
+            self.client = None
+            self.connected = False
+            raise
         self.connected = True
         self.busy = False
         self._consumer = asyncio.create_task(self._consume())
