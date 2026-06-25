@@ -72,6 +72,10 @@ class Outbox:
                 await asyncio.sleep(0.1)
             await asyncio.sleep(BATCH_WINDOW + 0.2)
         self._task.cancel()
+        try:
+            await self._task          # don't let the loop GC a pending task
+        except (asyncio.CancelledError, Exception):
+            pass
         self._task = None
 
     # -- producers (sync, callable from anywhere) --------------------------- #

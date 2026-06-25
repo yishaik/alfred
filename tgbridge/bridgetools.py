@@ -148,7 +148,14 @@ def build_bridge_server(session):
         if not text:
             return _text("text is required", err=True)
         kind = str(args.get("kind") or "note")
-        item = mgr.memory_for(session.cfg.name).add(text, kind=kind)
+        # add() spawns a short-lived `node` (napkin); keep it off the event loop
+        # so a ~1-2s cold start can't freeze every other session and the typing
+        # indicator while it runs.
+        mem = mgr.memory_for(session.cfg.name)
+        try:
+            item = await asyncio.to_thread(mem.add, text, kind)
+        except napkin_store.NapkinError as e:
+            return _text(f"couldn't save to memory: {e}", err=True)
         if item is None:
             return _text("nothing to remember", err=True)
         mgr.save_memory()
@@ -158,7 +165,8 @@ def build_bridge_server(session):
           "text. Use when something you stored is now wrong or obsolete.",
           {"text": Annotated[str, "substring identifying the item to drop"]})
     async def forget(args):
-        removed = mgr.memory_for(session.cfg.name).remove(str(args.get("text", "")))
+        mem = mgr.memory_for(session.cfg.name)
+        removed = await asyncio.to_thread(mem.remove, str(args.get("text", "")))
         if removed is None:
             return _text("no matching memory found", err=True)
         mgr.save_memory()
@@ -170,7 +178,8 @@ def build_bridge_server(session):
           "for notes, the file path — read the full file with `kb_read`.",
           {"query": Annotated[str, "what to search for (optional)"]})
     async def recall(args):
-        hits = mgr.memory_for(session.cfg.name).search(str(args.get("query", "")))
+        mem = mgr.memory_for(session.cfg.name)
+        hits = await asyncio.to_thread(mem.search, str(args.get("query", "")))
         if not hits:
             return _text("(nothing remembered yet)")
         lines = [f"[{it.kind}] {it.text}"
@@ -188,7 +197,7 @@ def build_bridge_server(session):
             return _text("file is required", err=True)
         vault = mgr.memory_for(session.cfg.name).vault
         try:
-            content = napkin_store.read(vault, name)
+            content = await asyncio.to_thread(napkin_store.read, vault, name)
         except napkin_store.NapkinError as e:
             return _text(f"couldn't read {name}: {e}", err=True)
         return _text(content or "(empty or not found)")

@@ -1144,15 +1144,22 @@ async def on_media(update: Update, ctx):
             entry["task"].cancel()
 
         async def flush(gid=gid, albums=albums):
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(1.5)        # debounce; cancelled by the next photo
             e = albums.pop(gid, None)
             if not e:
                 return
             combined = "\n".join(e["items"]) \
                 + (f"\n{e['caption']}" if e["caption"] else "")
-            await e["msg"].reply_text(
-                f"📎 album: {len(e['items'])} files saved → Claude")
-            await e["s"].feed(combined)
+            try:
+                await e["msg"].reply_text(
+                    f"📎 album: {len(e['items'])} files saved → Claude")
+                await e["s"].feed(combined)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # fire-and-forget task — log instead of leaving the exception
+                # unretrieved ("Task exception was never retrieved")
+                log.exception("album flush failed")
 
         entry["task"] = asyncio.create_task(flush())
         return

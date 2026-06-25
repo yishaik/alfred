@@ -276,18 +276,16 @@ class AgentManager:
         self.save_agents()
 
     async def stop_all(self):
-        if self._health_task:
-            self._health_task.cancel()
-        if self._proactive_task:
-            self._proactive_task.cancel()
-        if self._digest_task:
-            self._digest_task.cancel()
-        if self._escalate_task:
-            self._escalate_task.cancel()
-        if self._dream_task:
-            self._dream_task.cancel()
-        if self._watch_task:
-            self._watch_task.cancel()
+        loops = [self._health_task, self._proactive_task, self._digest_task,
+                 self._escalate_task, self._dream_task, self._watch_task]
+        live = [t for t in loops if t and not t.done()]
+        for t in live:
+            t.cancel()
+        for t in live:
+            try:
+                await t                # await so the loop can't GC a pending task
+            except (asyncio.CancelledError, Exception):
+                pass
         for s in list(self.sessions.values()):
             await s.stop()
             await s.outbox.stop()

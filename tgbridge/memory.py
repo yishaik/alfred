@@ -32,12 +32,15 @@ invalidated on every write.
 """
 
 import hashlib
+import logging
 import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import napkin_store
+
+log = logging.getLogger("bridge.memory")
 
 KINDS = ("pinned", "note", "fact")
 
@@ -146,8 +149,13 @@ class Memory:
         path = f"notes/{slug}.md"
         try:
             path = napkin_store.create(self.vault, f"notes/{slug}", text) or path
-        except napkin_store.NapkinError:
-            pass   # already exists (same text) -> already remembered
+        except napkin_store.NapkinError as e:
+            # a duplicate slug is the expected, benign case ("already remembered").
+            # Anything else (disk full, corrupt index) would otherwise silently
+            # lose the note — surface it so the tool can report failure.
+            if "already exist" not in str(e).lower():
+                log.warning("memory add failed in %s: %s", self.vault, e)
+                raise
         self._prompt_cache = None
         return MemoryItem(text=text, kind=kind, file=path, created=now)
 
@@ -194,9 +202,16 @@ class Memory:
                 out.append(MemoryItem(text=b, kind="pinned"))
         try:
             for r in napkin_store.search(self.vault, low):
+                # napkin returns Windows-style paths; normalise and surface ONLY
+                # user-authored notes. The vault ships with template scaffolding
+                # (references/_about.md, etc.) that BM25 would otherwise return
+                # as a fake "remembered" fact — add() only ever writes notes/.
+                fpath = (r.get("file", "") or "").replace("\\", "/")
+                if not fpath.startswith("notes/"):
+                    continue
                 snip = " ".join(s.get("text", "") for s in r.get("snippets", []))
-                out.append(MemoryItem(text=(snip.strip() or r.get("file", "")),
-                                      kind="note", file=r.get("file", "")))
+                out.append(MemoryItem(text=(snip.strip() or fpath),
+                                      kind="note", file=fpath))
         except napkin_store.NapkinError:
             pass
         return out

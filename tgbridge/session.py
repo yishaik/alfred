@@ -217,6 +217,10 @@ class AgentSession:
         self._typing: asyncio.Task | None = None
         self._watchdog: asyncio.Task | None = None
         self._crash_task: asyncio.Task | None = None
+        # serializes every connect/disconnect: a crash-restart, a user-triggered
+        # reconnect and an explicit /restart must never run two client.connect()
+        # calls at once (that orphans a claude.exe and leaks a _consume task).
+        self._life_lock = asyncio.Lock()
         self._last_rl_note = 0.0
         self._last_warn = 0.0
         self._turn_text_streamed = False
@@ -321,28 +325,62 @@ class AgentSession:
             self.cfg.workdir = WORKDIR
             self.mgr.save_agents()
 
-    async def start(self, resume: bool = True, fork: bool = False):
+    async def _cancel_tasks(self, *tasks):
+        """Cancel AND await background tasks so the loop can't GC a still-pending
+        one ("Task was destroyed but it is pending!"). Never awaits itself."""
+        current = asyncio.current_task()
+        live = [t for t in tasks if t and t is not current]
+        for t in live:
+            t.cancel()
+        for t in live:
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    def _fail_capture(self, reason: str):
+        """Resolve a pending collect() future so /branch & /merge can't hang for
+        the full timeout when a captured turn dies before its ResultMessage."""
+        cap = self._capture
+        if cap is not None:
+            fut = cap.get("future")
+            if fut and not fut.done():
+                fut.set_result(f"(no result: {reason})")
+
+    def _ensure_reconnect(self):
+        """Guarantee forward progress after a failed start/send: schedule one
+        backed-off crash-restart (which retries connect and drains the queue)
+        unless one is already pending or we're shutting down."""
+        if self._stopping:
+            return
+        if self._crash_task and not self._crash_task.done():
+            return
+        self._crash_task = asyncio.create_task(self._crash_restart())
+
+    async def _start_locked(self, resume: bool = True, fork: bool = False):
+        if self.connected and self.client:
+            return                       # a racing path already brought us up
         self._stopping = False
         if not resume:
             self.session_id = None
         self.outbox.start()
         self._ensure_workdir()
-        self.client = ClaudeSDKClient(self._options(fork=fork))
+        client = ClaudeSDKClient(self._options(fork=fork))
         try:
-            await self.client.connect()
+            await client.connect()
         except BaseException:
             # connect() can spawn the claude.exe subprocess and then fail the
             # init handshake (e.g. "Control request timeout: initialize"). Tear
-            # the half-open client down here, or the next start() retry would
-            # overwrite self.client and orphan that subprocess. BaseException so
-            # a cancelled/timed-out connect is cleaned up too.
+            # the half-open client down here so it can't orphan that subprocess;
+            # self.client stays None for the next retry. BaseException so a
+            # cancelled/timed-out connect is cleaned up too.
             try:
-                await self.client.disconnect()
+                await client.disconnect()
             except Exception:
                 pass
-            self.client = None
             self.connected = False
             raise
+        self.client = client
         self.connected = True
         self.busy = False
         self._consumer = asyncio.create_task(self._consume())
@@ -352,11 +390,16 @@ class AgentSession:
             self._watchdog = asyncio.create_task(self._watchdog_loop())
         log.info("session %s started (resume=%s)", self.skey, self.session_id)
 
-    async def stop(self):
+    async def start(self, resume: bool = True, fork: bool = False):
+        async with self._life_lock:
+            await self._start_locked(resume=resume, fork=fork)
+
+    async def _stop_locked(self):
         self._stopping = True
         self.connected = False
-        # unblock anything waiting on the user, or the question lock and the
-        # can_use_tool callback would hang forever across a restart
+        # unblock anything waiting on the user / on a captured turn, or the
+        # question lock, the can_use_tool callback and collect() would hang
+        # forever across a restart
         for st in list(self.questions.values()):
             f = st.get("future")
             if f and not f.done():
@@ -366,9 +409,9 @@ class AgentSession:
             f = st.get("future")
             if f and not f.done():
                 f.set_result("d")
-        for t in (self._consumer, self._typing, self._watchdog, self._crash_task):
-            if t:
-                t.cancel()
+        self._fail_capture("session restarted")
+        await self._cancel_tasks(self._consumer, self._typing, self._watchdog,
+                                 self._crash_task)
         self._consumer = self._typing = self._watchdog = self._crash_task = None
         if self.client:
             try:
@@ -378,17 +421,22 @@ class AgentSession:
             self.client = None
         self.busy = False
 
+    async def stop(self):
+        async with self._life_lock:
+            await self._stop_locked()
+
     async def restart(self, resume: bool = True, fork: bool = False,
                       note: str = "♻️ Restarting Claude…"):
         if note:
             self.outbox.emit(note)
         keep = list(self.pending)
-        await self.stop()
-        try:
-            await self.start(resume=resume, fork=fork)
-        except Exception as e:
-            self.outbox.emit(f"❌ restart failed: {e}")
-            return
+        async with self._life_lock:
+            await self._stop_locked()
+            try:
+                await self._start_locked(resume=resume, fork=fork)
+            except Exception as e:
+                self.outbox.emit(f"❌ restart failed: {e}")
+                return
         self.pending = deque(keep, maxlen=64)
         await self._drain()
 
@@ -458,6 +506,9 @@ class AgentSession:
             except Exception as e:
                 self.outbox.emit(f"❌ can't start Claude: {e}")
                 self.pending.appendleft((text, source))
+                self._fail_capture(f"can't start Claude: {e}")
+                self._react("😱")
+                self._ensure_reconnect()   # backed-off retry so it won't stall
                 return
         self.busy = True
         self.turn_started = time.monotonic()
@@ -476,10 +527,17 @@ class AgentSession:
             await self.client.query(sent)
         except Exception as e:
             self.busy = False
+            # a failed query almost always means the client is dead — drop the
+            # connected flag so the reconnect path does a clean restart, and
+            # don't leave the turn stuck in the queue with nothing pumping it.
+            self.connected = False
             metrics.bump("send_fail")
             self.outbox.emit(f"⚠️ couldn't send to Claude (message kept in "
-                             f"queue): {e} — /restart if this persists")
+                             f"queue): {e} — reconnecting…")
             self.pending.appendleft((text, source))
+            self._fail_capture(f"send failed: {e}")
+            self._react("😱")
+            self._ensure_reconnect()
 
     async def _drain(self):
         if self.pending and not self.busy:
@@ -500,12 +558,16 @@ class AgentSession:
             if self._stopping:
                 return
             log.warning("consume loop died: %s", e)
-        if not self._stopping:
-            self._crash_task = asyncio.create_task(self._crash_restart())
+        self._ensure_reconnect()
 
     async def _crash_restart(self):
-        self.connected = False
         self.busy = False
+        if self._stopping:
+            return
+        # a captured (/branch, /merge) turn that was in flight will never get
+        # its ResultMessage now — release collect() so it doesn't hang.
+        self._fail_capture("Claude crashed mid-turn")
+        self.connected = False
         self.mood.note_restart(crashed=True)   # next turn will be a touch careful
         self.mgr.note_crash()                  # feeds auto-escalation (#8)
         delay, drop_resume = self.backoff.record()
@@ -521,11 +583,14 @@ class AgentSession:
         await asyncio.sleep(delay)
         if self._stopping:
             return
-        try:
-            await self.start(resume=self.session_id is not None)
-        except Exception as e:
-            self.outbox.emit(f"❌ restart failed: {e} — /restart to retry")
-            return
+        async with self._life_lock:
+            if self._stopping or self.connected:
+                return                     # a racing path already reconnected
+            try:
+                await self._start_locked(resume=self.session_id is not None)
+            except Exception as e:
+                self.outbox.emit(f"❌ restart failed: {e} — /restart to retry")
+                return
         if self.pending:
             self.outbox.emit(f"🔁 re-sending {len(self.pending)} queued message(s)")
         await self._drain()

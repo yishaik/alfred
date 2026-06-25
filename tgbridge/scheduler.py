@@ -34,9 +34,14 @@ class Scheduler:
     def start(self):
         self._task = asyncio.create_task(self._loop())
 
-    def stop(self):
+    async def stop(self):
         if self._task:
             self._task.cancel()
+            try:
+                await self._task      # await so the loop can't GC a pending task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._task = None
 
     def _save(self):
         save_json(JOBS_FILE, {"seq": self.seq, "jobs": self.jobs})

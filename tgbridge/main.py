@@ -114,7 +114,7 @@ async def post_shutdown(app):
     m: AgentManager = app.bot_data.get("mgr")
     if m:
         if m.scheduler:
-            m.scheduler.stop()
+            await m.scheduler.stop()
         if m.peers:
             await m.peers.stop()
         await m.stop_all()
