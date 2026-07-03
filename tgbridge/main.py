@@ -1,5 +1,6 @@
 """Wiring: build the Telegram application, the manager, scheduler and peer bus."""
 
+import asyncio
 import logging
 from logging.handlers import RotatingFileHandler
 
@@ -19,43 +20,47 @@ from .scheduler import Scheduler
 log = logging.getLogger("bridge")
 
 
+# Hebrew descriptions — the owner is Hebrew-speaking; command names stay /english.
+# Every entry maps to a registered CommandHandler (see cmds in main); kept well
+# under Telegram's 100-command cap, each description short.
 BOT_COMMANDS = [
-    ("panel", "control panel"),
-    ("status", "bridge status"),
-    ("interrupt", "stop the current turn"),
-    ("mute", "silence this topic (keeps the session)"),
-    ("bg", "run a task in the background"),
-    ("branch", "run a prompt two ways, compare"),
-    ("merge", "two takes merged into one"),
-    ("agents", "manage agents"),
-    ("sessions", "resume a past conversation"),
-    ("find", "search past conversations"),
-    ("jobs", "scheduled reminders/prompts"),
-    ("remind", "remind <when>|<text>"),
-    ("todo", "Kanban to-do list"),
-    ("expense", "log & track spending"),
-    ("contact", "contact book"),
-    ("plan", "build today's plan"),
-    ("research", "deep research on a question"),
-    ("cr", "code-review shortcut"),
-    ("fork", "branch this conversation"),
-    ("auto", "toggle tap-to-approve"),
-    ("secretary", "toggle secretary mode"),
-    ("soul", "view/edit the agent's character"),
-    ("remember", "pin a fact across sessions"),
-    ("memory", "list what I remember"),
-    ("forget", "drop a remembered item"),
-    ("proactive", "toggle idle check-ins"),
-    ("tts", "toggle voice replies"),
-    ("voice", "pick the TTS voice"),
-    ("digest", "what I did today"),
-    ("costs", "cost + tool-activity breakdown"),
-    ("watch", "watch a path/repo for changes"),
-    ("audit", "recent tool calls"),
-    ("trace", "tool-call timeline (durations + ok/error)"),
-    ("brief", "morning brief on demand"),
-    ("logs", "recent warnings/errors"),
-    ("restart", "restart Claude (resumes)"),
+    ("panel", "לוח בקרה"),
+    ("status", "מצב"),
+    ("interrupt", "עצירה"),
+    ("restart", "אתחול session"),
+    ("mute", "השתקת השיחה (שומר את ה-session)"),
+    ("jobs", "תזמונים"),
+    ("remind", "תזכורת <מתי>|<טקסט>"),
+    ("bind", "חיבור topic לסוכן"),
+    ("agents", "ניהול סוכנים"),
+    ("bg", "הרצת משימה ברקע"),
+    ("branch", "הרצת prompt בשתי דרכים והשוואה"),
+    ("merge", "מיזוג שתי גרסאות לאחת"),
+    ("sessions", "חידוש שיחה קודמת"),
+    ("find", "חיפוש בשיחות קודמות"),
+    ("todo", "רשימת משימות (קנבן)"),
+    ("expense", "מעקב הוצאות"),
+    ("contact", "פנקס אנשי קשר"),
+    ("plan", "בניית תוכנית להיום"),
+    ("research", "מחקר מעמיק על שאלה"),
+    ("cr", "קיצור דרך ל-code-review"),
+    ("fork", "פיצול השיחה הזו"),
+    ("auto", "מעבר בין אישור-אוטומטי לאישור-בנגיעה"),
+    ("secretary", "מצב מזכיר"),
+    ("soul", "צפייה/עריכה של אופי הסוכן"),
+    ("remember", "שמירת עובדה בין sessions"),
+    ("memory", "מה אני זוכר"),
+    ("forget", "מחיקת פריט זכור"),
+    ("proactive", "צ׳ק-אין יזום בזמן חוסר פעילות"),
+    ("tts", "מענה קולי"),
+    ("voice", "בחירת קול ל-TTS"),
+    ("digest", "מה עשיתי היום"),
+    ("costs", "פירוט עלויות ופעילות כלים"),
+    ("watch", "מעקב אחרי נתיב/repo"),
+    ("audit", "קריאות כלים אחרונות"),
+    ("trace", "ציר-זמן קריאות כלים"),
+    ("brief", "תדריך בוקר לפי דרישה"),
+    ("logs", "אזהרות/שגיאות אחרונות"),
 ]
 
 
@@ -92,8 +97,8 @@ async def post_init(app):
     m.start_watch_loop()
     try:
         await app.bot.set_my_commands(BOT_COMMANDS)
-    except Exception:
-        log.exception("set_my_commands failed")
+    except Exception as e:
+        log.warning("set_my_commands failed: %s", e)   # never block startup
     try:
         INBOX.mkdir(parents=True, exist_ok=True)
     except Exception:
@@ -108,16 +113,35 @@ async def post_init(app):
             reply_markup=handlers.panel_kb(s))
     except Exception:
         log.exception("online message failed")
+    # a deliberate restart (restart.ps1) leaves this flag; a crash-respawn does
+    # not, so we only confirm a planned "back online" and never nag on a crash.
+    flag = STATE_DIR / ".restart-pending"
+    if flag.exists():
+        try:
+            flag.unlink()
+        except OSError:
+            pass
+        try:
+            await app.bot.send_message(CHAT_ID, "♻️ חזרתי — הגשר באוויר")
+        except Exception:
+            log.exception("back-online notice failed")
 
 
 async def post_shutdown(app):
     m: AgentManager = app.bot_data.get("mgr")
-    if m:
-        if m.scheduler:
-            await m.scheduler.stop()
-        if m.peers:
-            await m.peers.stop()
-        await m.stop_all()
+    if not m:
+        return
+    if m.scheduler:
+        m.scheduler._save()          # persist due-time updates before we cancel the loop
+        await m.scheduler.stop()
+    if m.peers:
+        await m.peers.stop()
+    # bound the teardown: stop_all drains each outbox before disconnecting its
+    # session, but a wedged claude.exe disconnect must not hang the whole exit.
+    try:
+        await asyncio.wait_for(m.stop_all(), timeout=30)
+    except asyncio.TimeoutError:
+        log.warning("stop_all timed out after 30s — exiting anyway")
 
 
 def _disable_wmi_platform_lookup():

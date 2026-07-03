@@ -80,10 +80,13 @@ def features_kb(s) -> InlineKeyboardMarkup:
 def model_kb(current: str) -> InlineKeyboardMarkup:
     def lbl(name, val):
         return ("● " if current == val else "") + name
+    # opus/haiku short aliases resolve to the latest (Opus 4.8 / Haiku 4.5). Sonnet 5
+    # and Fable 5 use dateless PINNED ids (not evergreen aliases), so pin them explicitly.
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(lbl("Opus", "opus"), callback_data="model:opus"),
-         InlineKeyboardButton(lbl("Sonnet", "sonnet"), callback_data="model:sonnet"),
-         InlineKeyboardButton(lbl("Haiku", "haiku"), callback_data="model:haiku")],
+         InlineKeyboardButton(lbl("Sonnet 5", "claude-sonnet-5"), callback_data="model:claude-sonnet-5"),
+         InlineKeyboardButton(lbl("Haiku", "haiku"), callback_data="model:haiku"),
+         InlineKeyboardButton(lbl("Fable", "claude-fable-5"), callback_data="model:claude-fable-5")],
         [InlineKeyboardButton(lbl("Default", ""), callback_data="model:"),
          InlineKeyboardButton("⬅ Back", callback_data="menu:back")],
     ])
@@ -118,20 +121,32 @@ def agents_kb(m: AgentManager) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def _job_when(j: dict) -> str:
+    """Next run as wall-clock local time from the stored epoch. The bridge host
+    runs on Asia/Jerusalem, so naive local conversion IS Jerusalem time — and it
+    needs no IANA tz database (not shipped with this Windows Python)."""
+    try:
+        from datetime import datetime
+        return datetime.fromtimestamp(j["next_ts"]).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return j.get("next_human", "?")
+
+
 def jobs_kb(m: AgentManager) -> tuple[str, InlineKeyboardMarkup]:
     jobs = m.scheduler.list_jobs() if m.scheduler else []
     if not jobs:
         return ("⏰ no scheduled jobs",
                 InlineKeyboardMarkup([[InlineKeyboardButton(
                     "⬅ Back", callback_data="menu:back")]]))
-    lines, rows = [f"⏰ jobs ({len(jobs)}/{MAX_JOBS}) — tap to cancel:"], []
-    for j in jobs[:25]:
-        lines.append(f"#{j['id']} {j['kind']} @ {j['next_human']}"
+    lines, rows = [f"⏰ jobs ({len(jobs)}/{MAX_JOBS}) — times in Asia/Jerusalem:"], []
+    for i, j in enumerate(jobs[:25], 1):
+        lines.append(f"{i}. #{j['id']} {j['kind']} @ {_job_when(j)}"
                      + (f" ({j['recur']})" if j.get("recur") else "")
                      + f" [{j['agent']}]: {j['text'][:60]}")
-        rows.append([InlineKeyboardButton(f"❌ #{j['id']} {j['text'][:30]}",
-                                          callback_data=f"jbd:{j['id']}")])
-    rows.append([InlineKeyboardButton("⬅ Back", callback_data="menu:back")])
+        rows.append([InlineKeyboardButton(f"❌ {i}. #{j['id']} {j['text'][:28]}",
+                                          callback_data=f"job:cancel:{j['id']}")])
+    rows.append([InlineKeyboardButton("↻ Refresh", callback_data="job:refresh"),
+                 InlineKeyboardButton("⬅ Back", callback_data="menu:back")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -159,23 +174,25 @@ def _status_text(m: AgentManager) -> str:
 # --------------------------------------------------------------------------- #
 async def cmd_start(update: Update, ctx):
     s = await _session(update, ctx)
+    # section titles in Hebrew (the owner is Hebrew-speaking); command names stay
+    # /english so they remain tappable/typable exactly as registered.
     await update.message.reply_text(
         "🎩 𝗔𝗹𝗳𝗿𝗲𝗱 𝗼𝗻𝗹𝗶𝗻𝗲\n"
         f"{SEP}\n"
-        f"⚡ agent: {s.cfg.name}\n"
-        f"🧠 model: {_pretty_model(s.model) or 'default'}\n"
-        f"📂 cwd: {s.cfg.workdir}\n"
+        f"⚡ סוכן: {s.cfg.name}\n"
+        f"🧠 מודל: {_pretty_model(s.model) or 'default'}\n"
+        f"📂 תיקייה: {s.cfg.workdir}\n"
         f"{SEP}\n"
-        "Type to talk; /slashcommands pass to Claude. "
-        "Tap /panel → ✨ Features for everything.\n\n"
-        "🎛 Control: /panel /status /restart /interrupt /mute\n"
-        "🧠 Memory: /remember /memory /forget\n"
-        "🎭 Self: /soul /proactive /voice\n"
-        "🌊 Watch: /watch /digest /costs /peers\n"
-        "🧵 Parallel: /bg /branch /merge /agents\n"
-        "⏰ Time: /remind /jobs\n"
-        "👤 Agent: /auto /secretary /cwd /bind /fork /sessions\n\n"
-        "💡 React 👎 to interrupt · edit a message to correct it.",
+        "כתוב כדי לשוחח; /slashcommands עוברות ל-Claude. "
+        "הקש /panel → ✨ Features לכל השאר.\n\n"
+        "🎛 בקרה: /panel /status /restart /interrupt /mute\n"
+        "🧠 זיכרון: /remember /memory /forget\n"
+        "🎭 אופי: /soul /proactive /voice\n"
+        "🌊 מעקב: /watch /digest /costs /peers\n"
+        "🧵 מקבילי: /bg /branch /merge /agents\n"
+        "⏰ זמן: /remind /jobs\n"
+        "👤 סוכן: /auto /secretary /cwd /bind /fork /sessions\n\n"
+        "💡 הגב 👎 כדי לעצור · ערוך הודעה כדי לתקן אותה.",
         reply_markup=panel_kb(s))
 
 
@@ -188,7 +205,7 @@ async def cmd_panel(update: Update, ctx):
     mood_part = f" · {s.mood.label()}" if s.cfg.soul.is_set() else ""
     mute_part = " · 🔇 muted" if s.outbox.muted else ""
     header = (f"⚡ {s.cfg.name} · 🧠 {_pretty_model(s.model) or 'default'} · "
-              f"💰 ${m.today_cost():.2f} today{ctx_part}{tts_part}{mood_part}{mute_part}")
+              f"💰 ${m.today_cost():.2f} היום{ctx_part}{tts_part}{mood_part}{mute_part}")
     await update.message.reply_text(header, reply_markup=panel_kb(s))
 
 
@@ -438,12 +455,14 @@ async def cmd_cwd(update: Update, ctx):
 
 
 async def cmd_bind(update: Update, ctx):
+    from .config import CHAT_ID
     m = mgr(ctx)
     chat_id, thread_id = _route(update)
-    if chat_id != GROUP_ID:
+    # /bind works in a forum-group topic OR in a native thread of the private chat
+    if not ((GROUP_ID and chat_id == GROUP_ID) or (chat_id == CHAT_ID and thread_id)):
         await update.message.reply_text(
-            "/bind works inside a forum topic (set BRIDGE_GROUP_ID and message "
-            "the bot from a topic).")
+            "/bind works inside a thread — open a thread in this chat (or a forum "
+            "topic) and run /bind <agent> there.")
         return
     name = (ctx.args or [""])[0]
     if name not in m.agents:
@@ -1320,8 +1339,11 @@ async def on_callback(update: Update, ctx):
         if name != "main" and name in m.agents:
             await m.remove_agent(name)
         await _edit(q, "Agents:", agents_kb(m))
-    elif data.startswith("jbd:"):
-        m.scheduler.cancel(data[4:])
+    elif data.startswith("job:cancel:"):
+        m.scheduler.cancel(data[len("job:cancel:"):])
+        text, kb = jobs_kb(m)
+        await _edit(q, text[:4000], kb)
+    elif data == "job:refresh":
         text, kb = jobs_kb(m)
         await _edit(q, text[:4000], kb)
     elif data.startswith("pgc:"):
@@ -1519,8 +1541,8 @@ async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE):
                 CHAT_ID, "⚠️ Another bridge instance is polling this bot. Only "
                 "one should run — check for a duplicate start_bridge / leftover "
                 "python bridge.py. This instance keeps retrying meanwhile.")
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("conflict notice send failed: %s", e)
         return
     metrics.bump("handler_error")
     log.exception("handler error", exc_info=err)
@@ -1531,5 +1553,5 @@ async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE):
         from .config import CHAT_ID
         await ctx.bot.send_message(
             CHAT_ID, f"⚠️ bridge error: {type(err).__name__}: {str(err)[:300]}")
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("error notice send failed: %s", e)

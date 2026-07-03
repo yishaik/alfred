@@ -61,6 +61,7 @@ class AgentManager:
         self.session_ids: dict[str, str] = load_json(SESSIONS_FILE, {})
         self._migrate_legacy()
         self.topics: dict[str, str] = load_json(TOPICS_FILE, {})  # thread_id -> agent
+        self._prune_orphan_sessions()
         self.costs: dict[str, float] = load_json(COSTS_FILE, {})
         # Long-term memory is now a per-agent Napkin vault (state/kb/<agent>/),
         # built lazily on first use and cached here. A one-time migration drains
@@ -98,6 +99,30 @@ class AgentManager:
                 self.session_ids["main@p"] = sid
                 save_json(SESSIONS_FILE, self.session_ids)
                 log.info("migrated legacy session id for main@p")
+
+    def _prune_orphan_sessions(self):
+        """Drop saved session ids that can no longer be reached: <agent>@p for a
+        deleted agent, or <agent>@t<tid> whose topic binding is gone. main@t0
+        (the private-chat General thread) is always kept. Replaces the offline
+        prune that tidy_restart.ps1 used to do out-of-band."""
+        def valid(key: str) -> bool:
+            agent, sep, route = key.partition("@")
+            if not sep or agent not in self.agents:
+                return route == "t0" and agent == "main"
+            if route == "p":
+                return True
+            if route == "t0" and agent == "main":
+                return True
+            if route.startswith("t"):
+                return self.topics.get(route[1:]) == agent
+            return False
+        dropped = [k for k in self.session_ids if not valid(k)]
+        if dropped:
+            for k in dropped:
+                self.session_ids.pop(k, None)
+            save_json(SESSIONS_FILE, self.session_ids)
+            log.info("pruned %d orphan session id(s): %s",
+                     len(dropped), ", ".join(dropped))
 
     # -- persistence ------------------------------------------------------- #
     def save_agents(self):
@@ -230,6 +255,13 @@ class AgentManager:
             agent = self.topics.get(str(tid), self.active)
             return await self._get_session(agent, f"{agent}@t{tid}",
                                            chat_id, thread_id)
+        # private chat with native bot threads: a thread that's been /bind-ed gets
+        # its OWN session+context; the main/General thread (and any unbound thread)
+        # stays on the primary session so the ongoing conversation is never split.
+        if thread_id and str(thread_id) in self.topics:
+            agent = self.topics.get(str(thread_id), self.active)
+            return await self._get_session(agent, f"{agent}@t{thread_id}",
+                                           chat_id, thread_id)
         agent = self.active
         return await self._get_session(agent, f"{agent}@p", chat_id, None)
 
@@ -240,10 +272,16 @@ class AgentManager:
 
     async def session_for_job(self, agent: str, chat_id: int | None,
                               thread_id: int | None) -> AgentSession:
-        """Session for a scheduled job, honoring where it was created."""
+        """Session for a scheduled job, honoring where it was created. A topic
+        route whose binding has since been removed falls back to the agent's
+        private-chat session rather than resurrecting a dead topic (A5)."""
         if agent not in self.agents:
             agent = self.active if self.active in self.agents else "main"
         skey = job_skey(agent, chat_id, thread_id)
+        if not skey.endswith("@p") and self.topics.get(str(thread_id or 0)) != agent:
+            log.warning("job route %s: topic binding gone — delivering to %s@p",
+                        skey, agent)
+            skey = f"{agent}@p"
         if skey.endswith("@p"):
             return await self._get_session(agent, skey, CHAT_ID, None)
         return await self._get_session(agent, skey, chat_id, thread_id)

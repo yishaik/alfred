@@ -127,9 +127,9 @@ class PeerBus:
                 str(body.get("text", ""))[:8000],
                 int(body.get("hop", 0)))
         except Exception as e:
-            log.debug("peer request rejected: %s", e)
+            log.warning("peer message failed: %s", e)
             try:
-                await self._respond(writer, 400, {"ok": False})
+                await self._respond(writer, 500, {"ok": False})
             except Exception:
                 pass
         finally:

@@ -114,10 +114,12 @@ class Scheduler:
             # deliver where the job was created (forum topic or private chat)
             session = await self.mgr.session_for_job(
                 job["agent"], job.get("chat_id"), job.get("thread_id"))
+            # header so it's obvious what fired and for which agent (A5)
+            head = f"⏰ job #{job['id']} · {job['agent']}"
             if job["kind"] == "remind":
-                session.outbox.emit(f"⏰ reminder: {job['text']}")
+                session.outbox.emit(f"{head}\n{job['text']}")
             else:
-                session.outbox.emit(f"⏰ scheduled prompt #{job['id']} firing")
+                session.outbox.emit(f"{head} — running")
                 await session.feed(
                     f"[scheduled job #{job['id']}] {job['text']}",
                     TurnSource(kind="sched"))

@@ -10,6 +10,7 @@ even when the venv is broken.
 """
 
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -39,6 +40,15 @@ def _note(fh, text):
 
 def main():
     os.environ["PYTHONUTF8"] = "1"
+    # SIGTERM (a clean service/manager stop) must end the supervisor loop, not
+    # trigger a respawn. Raising KeyboardInterrupt reuses the Ctrl-C path below,
+    # which terminates the running bridge child and returns.
+    def _on_sigterm(_signum, _frame):
+        raise KeyboardInterrupt
+    try:
+        signal.signal(signal.SIGTERM, _on_sigterm)
+    except (ValueError, OSError):
+        pass                # non-main thread / platform without SIGTERM
     fast_exits = 0
     while True:
         _rotate()

@@ -7,6 +7,7 @@ Claude, i.e. it is as sensitive as a shell on this machine).
 
 import json
 import os
+import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -200,10 +201,18 @@ def load_json(path: Path, default):
         return default
 
 
+# One lock funnels every state write. save_json is the single writer for all
+# state files, so serializing it here covers concurrent async handlers AND the
+# scheduler thread (the file I/O below is synchronous) — a second writer can't
+# interleave write_text/replace and leave a half-written or clobbered file.
+_SAVE_LOCK = threading.Lock()
+
+
 def save_json(path: Path, data) -> None:
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    tmp.replace(path)
+    with _SAVE_LOCK:
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(path)
 
 
 def authorized_chat(chat_id: int) -> bool:

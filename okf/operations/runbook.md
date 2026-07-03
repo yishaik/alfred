@@ -10,7 +10,7 @@ timestamp: 2026-06-17T00:00:00Z
 A single healthy bridge is **four** python processes — see
 [the process model](/architecture/process-model.md). Don't count `bridge.py`
 instances; don't kill "the one whose parent isn't supervisor.py." Force a clean
-restart with `restart_bridge.ps1`.
+restart with `restart.ps1` (add `-Tidy` to also prune orphan session ids).
 
 # `Conflict: terminated by other getUpdates`
 Two independent launchers poll the same token. The

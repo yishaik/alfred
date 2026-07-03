@@ -24,8 +24,9 @@ shim path, so every spawn repeats the trick). So:
 
 - Do **not** count `python … bridge.py` instances to detect a duplicate.
 - Do **not** kill "the one whose parent isn't supervisor.py" — that is the real bridge.
-- To force a clean restart, run `restart_bridge.ps1` (kills the whole tree + the
-  `start_bridge.bat` loop, relaunches one instance, logs to `restart.log`).
+- To force a clean restart, run `restart.ps1` (kills the whole tree + the
+  `start_bridge.bat` loop, relaunches one instance, logs to `restart.log`;
+  add `-Tidy` to also prune orphan session ids).
 
 # Single-instance lock
 

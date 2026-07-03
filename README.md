@@ -203,9 +203,9 @@ full `C:` can't break it.
   the trick. So one supervisor = `.venv shim → uv real`, one bridge = the same
   pair. Do **not** count `python … bridge.py` instances to detect a duplicate,
   and do **not** "kill the one whose parent isn't supervisor.py" — that is the
-  real working bridge. To force a clean restart, run `restart_bridge.ps1` (kills
+  real working bridge. To force a clean restart, run `restart.ps1` (kills
   the whole tree + the `start_bridge.bat` loop, relaunches one instance, logs to
-  `restart.log`).
+  `restart.log`; add `-Tidy` to also prune orphan session ids).
 - **`Conflict: terminated by other getUpdates`**: two *independent launchers* are
   polling the same bot token (e.g. a stray scheduled task plus the Startup
   `.vbs`). The single-instance lock (`BRIDGE_LOCK_PORT`) makes the loser refuse
@@ -213,7 +213,7 @@ full `C:` can't break it.
   `another instance is already running … Refusing to start` + `exited rc=1` in
   `bridge.log` — that, not the process count, is how you confirm a true
   duplicate. Find the second launcher (Startup folder, `schtasks`, Run keys,
-  pm2) and remove it, or run `restart_bridge.ps1` to reset to one instance.
+  pm2) and remove it, or run `restart.ps1` to reset to one instance.
 - **State file corrupted** (`agents.json`, `jobs.json`, …): stop the bridge,
   restore the file from the newest `state\backup\state-*.zip`, restart.
 - **Bot token leaked**: @BotFather → `/revoke` immediately (the token is a

@@ -269,8 +269,8 @@ class AgentSession:
                 await self.mgr.bot.set_message_reaction(
                     self.chat_id, mid,
                     reaction=[ReactionTypeEmoji(emoji=emoji)] if emoji else [])
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("reaction %s failed: %s", emoji, e)
         asyncio.create_task(_go())
 
     # -- lifecycle ----------------------------------------------------------- #
@@ -558,6 +558,12 @@ class AgentSession:
             if self._stopping:
                 return
             log.warning("consume loop died: %s", e)
+            # B4: a turn that died mid-flight was silent to the user — surface
+            # one short Hebrew gist. _crash_restart then narrates the recovery
+            # (a distinct concern), so this doesn't duplicate its restart notice.
+            if self.busy:
+                gist = str(e).splitlines()[0][:120] if str(e).strip() else type(e).__name__
+                self.outbox.emit(f"⚠️ התקלה: {gist} — נסה שוב או /restart")
         self._ensure_reconnect()
 
     async def _crash_restart(self):

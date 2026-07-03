@@ -282,6 +282,7 @@ class Outbox:
                          html: bool = False, html_text: str | None = None,
                          disable_preview: bool = True):
         raw = text if text is not None else ""
+        last_err: Exception | None = None
         for attempt in range(4):
             await self._throttle()
             try:
@@ -299,15 +300,18 @@ class Outbox:
                     disable_web_page_preview=disable_preview,
                     message_thread_id=self.thread_id)
             except RetryAfter as e:
+                last_err = e
                 await asyncio.sleep(e.retry_after + 0.5)
-            except (TimedOut, NetworkError):
+            except (TimedOut, NetworkError) as e:
+                last_err = e
                 await asyncio.sleep(1 + attempt)
-            except Exception:
+            except Exception as e:
+                last_err = e
                 if attempt == 3:
                     break
                 await asyncio.sleep(0.5)
         metrics.bump("outbox_drop")
-        log.error("dropped message after retries: %.300s", raw)
+        log.error("dropped message after retries (%s): %.300s", last_err, raw)
         return None
 
     async def _send_as_file(self, text: str, name: str):
