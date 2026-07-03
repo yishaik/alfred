@@ -60,6 +60,8 @@ BOT_COMMANDS = [
     ("audit", "קריאות כלים אחרונות"),
     ("trace", "ציר-זמן קריאות כלים"),
     ("brief", "תדריך בוקר לפי דרישה"),
+    ("router", "ראוטר מודלים — מצב ושליטה"),
+    ("routes", "החלטות ניתוב אחרונות"),
     ("logs", "אזהרות/שגיאות אחרונות"),
 ]
 
@@ -250,6 +252,8 @@ def main():
         "audit": handlers.cmd_audit,
         "trace": handlers.cmd_trace,
         "brief": handlers.cmd_brief,
+        "router": handlers.cmd_router,
+        "routes": handlers.cmd_routes,
         "logs": handlers.cmd_logs,
     }
     for name, fn in cmds.items():

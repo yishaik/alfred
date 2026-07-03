@@ -823,6 +823,199 @@ async def test_peer_protocol():
     await bus._http.aclose()
 
 
+class _FakeCfg:
+    def __init__(self, name="main", model="", workdir="D:\\Projects"):
+        self.name = name
+        self.model = model
+        self.workdir = workdir
+
+
+class _FakeMgr:
+    def __init__(self):
+        self.agents = {"main": _FakeCfg("main"),
+                       "clips": _FakeCfg("clips", workdir="D:\\Projects\\clip-factory")}
+
+
+class _FakeSession:
+    """Minimal stand-in exposing exactly what router.classify reads."""
+    def __init__(self, name="main", model="", questions=None, free_history=None):
+        self.cfg = _FakeCfg(name, model)
+        self.mgr = _FakeMgr()
+        self.questions = questions or {}
+        self.free_history = list(free_history or [])
+
+
+def _done_fut():
+    import asyncio as _a
+    loop = _a.new_event_loop()
+    f = loop.create_future()
+    f.set_result("x")
+    return f
+
+
+def _pending_fut():
+    import asyncio as _a
+    loop = _a.new_event_loop()
+    return loop.create_future()
+
+
+async def test_router_heuristics():
+    from tgbridge import router
+
+    async def h(text, sess=None):
+        return await router.classify(text, sess or _FakeSession())
+
+    # action verb (Hebrew) -> claude
+    d = await h("תבנה לי סקריפט")
+    check("router: HE build verb -> claude", d.route == "claude", d.reason)
+
+    # forced claude prefix, text stripped
+    d = await h("!c מה השעה")
+    check("router: !c forces claude", d.route == "claude" and d.source == "forced")
+    check("router: !c strips prefix", d.text == "מה השעה", repr(d.text))
+
+    # forced free prefix
+    d = await h("!f מה נשמע")
+    check("router: !f forces free", d.route == "free" and d.text == "מה נשמע")
+
+    # forced tier
+    d = await h("!opus refactor this")
+    check("router: !opus -> claude+opus", d.route == "claude" and d.tier == "opus")
+
+    # drive path -> claude
+    d = await h("open D:\\Projects\\foo.txt please")
+    check("router: drive path -> claude", d.route == "claude", d.reason)
+
+    # slash command -> claude
+    d = await h("/status")
+    check("router: slash -> claude", d.route == "claude")
+
+    # code fence -> claude
+    d = await h("what does ```x=1``` do")
+    check("router: code fence -> claude", d.route == "claude")
+
+    # project token from agents.json -> claude
+    d = await h("how is clip-factory doing")
+    check("router: project token -> claude", d.route == "claude", d.reason)
+
+    # pending question mid-dialog -> claude
+    sess = _FakeSession(questions={1: {"future": _pending_fut()}})
+    d = await h("blue", sess)
+    check("router: pending question -> claude", d.route == "claude", d.reason)
+
+    # long non-summary -> claude
+    d = await h("x " * 1100)
+    check("router: long non-summary -> claude", d.route == "claude", d.reason)
+
+    # env kill switch forces claude regardless of content
+    import os
+    os.environ["BRIDGE_ROUTER"] = "0"
+    try:
+        d = await h("מה בירת צרפת")
+        check("router: kill switch -> claude", d.route == "claude" and d.source == "forced")
+    finally:
+        os.environ.pop("BRIDGE_ROUTER", None)
+
+    # a benign quick question is left UNDECIDED by heuristics (escalates to LLM);
+    # with no classifier reachable it must still NOT crash and fail-safe to claude.
+    d = await h("מה בירת צרפת")
+    check("router: quick Q classified without crash",
+          d.route in ("free", "claude"), d.reason)
+
+
+def test_router_provider_skip():
+    import os
+    from tgbridge import router
+    cfg = router.RouterConfig()
+    counts = {"gemini": 999}
+
+    # provider whose env key is unset should be skippable by caller logic:
+    orig = os.environ.pop("OPENROUTER_API_KEY", None)
+    try:
+        key_missing = not os.environ.get("OPENROUTER_API_KEY", "")
+        check("router: missing env key detected", key_missing)
+    finally:
+        if orig is not None:
+            os.environ["OPENROUTER_API_KEY"] = orig
+
+    # rpd budget spent
+    gemini = next(p for p in cfg.providers if p["name"] == "gemini")
+    check("router: rpd spent when >= budget", router._rpd_spent(gemini, counts))
+    check("router: rpd not spent under budget",
+          not router._rpd_spent(gemini, {"gemini": 1}))
+    # ollama has rpd 0 -> never spent
+    ollama = next(p for p in cfg.providers if p["name"] == "ollama")
+    check("router: unlimited provider never rpd-spent",
+          not router._rpd_spent(ollama, {"ollama": 10 ** 9}))
+
+    # rpm throttle: fill the window, then it throttles
+    prov = {"name": "t_prov", "rpm": 2}
+    router._rpm_hits.pop("t_prov", None)
+    check("router: rpm not throttled when empty", not router._rpm_throttled(prov))
+    router._rpm_record(prov); router._rpm_record(prov)
+    check("router: rpm throttled when full", router._rpm_throttled(prov))
+
+
+def test_router_usage_rollover(tmp_dir):
+    import json as _json
+    from pathlib import Path
+    from tgbridge import router
+    # point the usage file at a temp path
+    orig = router.USAGE_FILE
+    router.USAGE_FILE = tmp_dir / "router-usage.json"
+    try:
+        # stale (yesterday) file must reset on load
+        router.USAGE_FILE.write_text(
+            _json.dumps({"date": "2000-01-01", "counts": {"gemini": 7}}),
+            encoding="utf-8")
+        u = router._load_usage()
+        check("router: usage resets on date rollover", u["counts"] == {}, str(u))
+        router._bump_usage("gemini")
+        router._bump_usage("gemini")
+        check("router: usage bump counts", router.usage_today().get("gemini") == 2)
+    finally:
+        router.USAGE_FILE = orig
+
+
+async def test_router_failsafe_feed():
+    """A raising router.classify must NOT lose the message: feed() falls through
+    to _send_turn exactly as today."""
+    from tgbridge import router
+    from tgbridge.session import AgentConfig, AgentSession, TurnSource
+
+    class FakeBot:
+        pass
+
+    class FakeMgr:
+        def __init__(self):
+            self.bot = FakeBot()
+            self.session_ids = {}
+            self.active = "w"
+            self.agents = {"w": AgentConfig(name="w")}
+        def add_cost(self, c):
+            return (0.0, None)
+
+    s = AgentSession(FakeMgr(), AgentConfig(name="w"), "w@p", 1, 1, None)
+    s.busy = False
+    sent = []
+
+    async def fake_send_turn(text, source):
+        sent.append(text)
+    s._send_turn = fake_send_turn
+
+    async def boom(text, sess):
+        raise RuntimeError("classifier exploded")
+    orig = router.classify
+    router.classify = boom
+    try:
+        ok = await s.feed("hello world", TurnSource())
+    finally:
+        router.classify = orig
+    check("router failsafe: feed returns True", ok is True)
+    check("router failsafe: message still reached _send_turn",
+          sent == ["hello world"], str(sent))
+
+
 if __name__ == "__main__":
     test_fmt()
     test_markers()
@@ -860,9 +1053,14 @@ if __name__ == "__main__":
     test_proactive()
     test_voice_picker()
     test_singleton_lock()
+    test_router_provider_skip()
+    with tempfile.TemporaryDirectory() as _td:
+        test_router_usage_rollover(Path(_td))
     asyncio.run(test_question_serialization())
     asyncio.run(test_collect())
     asyncio.run(test_peer_protocol())
+    asyncio.run(test_router_heuristics())
+    asyncio.run(test_router_failsafe_feed())
     print("-" * 40)
     print("ALL OK" if FAIL == 0 else f"{FAIL} FAILURES")
     sys.exit(1 if FAIL else 0)

@@ -26,7 +26,7 @@ from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
                       ReactionTypeEmoji)
 from telegram.constants import ChatAction
 
-from . import bridgetools, guards, markers, voice
+from . import bridgetools, guards, markers, router, voice
 import os
 
 from . import metrics
@@ -245,6 +245,16 @@ class AgentSession:
         self._streaming_tools: list[str] = []
         self._turn_had_tools = False
         self._shell_calls: dict[str, bool] = {}   # tool_use_id -> shell? (Bash/PS)
+        # model router (free-model side channel): rolling (user, assistant≤300)
+        # pairs feed the free model real context; free_notes are quick side-model
+        # exchanges not yet told to Claude; _turn_model is a per-turn tier pick
+        # for full mode (agents on auto) applied in _send_turn.
+        self.free_history: deque = deque(maxlen=8)
+        self.free_notes: list = []
+        self._turn_model: str = ""
+        self._last_applied_model: str = ""
+        self._turn_user_text: str = ""     # raw user text of the in-flight turn
+        self._turn_final_text: str = ""     # last assistant text of that turn
 
     def _prefix(self) -> str:
         # label output whenever "who is talking" isn't obvious: any group/topic
@@ -458,6 +468,14 @@ class AgentSession:
             # the user is back — reset the idle clock and re-arm proactive
             self.last_activity = time.monotonic()
             self.proactive_armed = True
+            # --- model router (fail-safe): scheduler/peer/bot turns never routed.
+            # ANY error here → log + fall through to the Claude session as today.
+            try:
+                text = await self._maybe_route(text)
+                if text is None:
+                    return True          # free model answered; Claude untouched
+            except Exception as e:
+                log.warning("router hook failed, using Claude: %s", e)
         if source.kind != "user" and not self.bot_turn_bucket.allow():
             self.outbox.emit(
                 f"🚦 dropped {source.kind} turn (rate limit "
@@ -477,6 +495,40 @@ class AgentSession:
             return True
         await self._send_turn(text, source)
         return True
+
+    async def _maybe_route(self, text: str) -> str | None:
+        """Pre-prompt model router. Returns the (possibly prefix-stripped) text
+        to hand to Claude, or None when a FREE model already answered (the caller
+        returns without touching the Claude session — this works even mid-turn).
+
+        Wrapped by feed() in try/except; still fail-safe internally so a router
+        hiccup can only ever fall through to Claude, never drop a message."""
+        decision = await router.classify(text, self)
+        # remember a per-turn tier pick for full mode (auto agents only)
+        if decision.route == "claude":
+            if (decision.tier
+                    and router.load_config().agent_mode(self.cfg.name) == "full"
+                    and self.cfg.model == ""):
+                self._turn_model = decision.tier
+            router.log_claude(self, decision.text, decision)
+            return decision.text
+        # free route
+        self._react("👀")
+        res = await router.answer_free(decision.text, self, decision)
+        if not res:
+            return decision.text          # free model punted → Claude
+        ans, provider_short = res
+        cfg = router.load_config()
+        body = f"🎈 {provider_short} · {ans}" if cfg.tag_replies else ans
+        self.outbox.emit(body)
+        self._react("👍")
+        # keep the free model's own context, and stash a note so Claude's next
+        # real turn learns what was said on the side.
+        q = (decision.text or "")[:300]
+        a = (ans or "")[:300]
+        self.free_history.append((q, a))
+        self.free_notes.append(f"Q:{q[:180]} → A:{a[:180]}")
+        return None
 
     async def collect(self, text: str, timeout: float = 300.0) -> str:
         """Run ONE turn and return its final assistant text, with the normal
@@ -518,10 +570,33 @@ class AgentSession:
         self.turn_user_uuid = None
         self.turn_files_touched = False
         self._turn_had_tools = False
+        # router: remember the clean user text (no mood/FYI wrappers) so the
+        # free model gets real Claude-turn context; reset the final-text buffer.
+        if source.kind == "user":
+            self._turn_user_text = text
+        self._turn_final_text = ""
+        # router (full mode): apply a per-turn tier for auto agents. Never touch
+        # cfg.model (a persistent pin stays authoritative). Guarded — a set_model
+        # failure just proceeds on whatever model is already loaded.
+        if self._turn_model and self._turn_model != self._last_applied_model:
+            try:
+                await self.client.set_model(self._turn_model or None)
+                self._last_applied_model = self._turn_model
+            except Exception as e:
+                log.debug("per-turn set_model(%s) failed: %s", self._turn_model, e)
+        self._turn_model = ""
         # mood: prepend a one-line tone nudge only when the weather has shifted
         # (pop_nudge returns "" if unchanged) so we never spam the turn stream.
         nudge = self.mood.pop_nudge()
         sent = f"[mood — {nudge}]\n{text}" if nudge else text
+        # free-context handoff: tell Claude what the side model already answered
+        # since its last turn, so its world stays consistent. Then clear it.
+        if self.free_notes:
+            notes = self.free_notes[:5]
+            self.free_notes = []
+            block = " ".join(n[:200] for n in notes)
+            sent = ("[FYI — quick side-model exchanges since your last turn: "
+                    f"{block}]\n{sent}")
         self._react("👀")          # acknowledge: working on it
         try:
             await self.client.query(sent)
@@ -696,6 +771,8 @@ class AgentSession:
                     tools.append((block.name, summ))
             full = "\n".join(t for t in texts if t)
             parsed = markers.parse(full)
+            if parsed.text:
+                self._turn_final_text = parsed.text   # last assistant text this turn
             if self._capture is not None and parsed.text:
                 self._capture["texts"].append(parsed.text)   # branch/merge gather
             # proactive check-in that chose silence: drop the whole turn quietly
@@ -820,6 +897,13 @@ class AgentSession:
                 self.outbox.keyboard(foot, InlineKeyboardMarkup([buttons]))
             else:
                 self.outbox.emit(foot)
+            # router: give the free model real context — append this Claude turn's
+            # (user, final-reply≤300) to the rolling history.
+            if self._turn_user_text and self._turn_final_text:
+                self.free_history.append((self._turn_user_text[:300],
+                                          self._turn_final_text[:300]))
+                self._turn_user_text = ""
+                self._turn_final_text = ""
             await self._drain()
             return
 

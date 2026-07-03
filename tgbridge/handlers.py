@@ -7,7 +7,7 @@ import re
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from . import metrics, voice
+from . import metrics, router, voice
 from .config import (APP_LOG_FILE, AUDIT_FILE, GROUP_ID, INBOX, MAX_JOBS,
                      PEERS, authorized_chat)
 from .manager import AgentManager
@@ -56,6 +56,7 @@ def panel_kb(s) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("✨ Features", callback_data="menu:features"),
          InlineKeyboardButton("📈 Usage", callback_data="send:/usage"),
          InlineKeyboardButton("📂 Status", callback_data="act:status")],
+        [InlineKeyboardButton("🎈 Router", callback_data="menu:router")],
     ])
 
 
@@ -89,6 +90,20 @@ def model_kb(current: str) -> InlineKeyboardMarkup:
          InlineKeyboardButton(lbl("Fable", "claude-fable-5"), callback_data="model:claude-fable-5")],
         [InlineKeyboardButton(lbl("Default", ""), callback_data="model:"),
          InlineKeyboardButton("⬅ Back", callback_data="menu:back")],
+    ])
+
+
+def router_kb(cfg) -> InlineKeyboardMarkup:
+    """Inline controls for the /router card: mode radio + tag toggle."""
+    def mlbl(name, val):
+        return ("● " if cfg.mode == val else "") + name
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(mlbl("off", "off"), callback_data="rt:mode:off"),
+         InlineKeyboardButton(mlbl("free-only", "free_only"), callback_data="rt:mode:free_only"),
+         InlineKeyboardButton(mlbl("full", "full"), callback_data="rt:mode:full")],
+        [InlineKeyboardButton(f"🎈 tag {'ON' if cfg.tag_replies else 'off'}",
+                              callback_data=f"rt:tag:{0 if cfg.tag_replies else 1}"),
+         InlineKeyboardButton("🔄 refresh", callback_data="rt:show")],
     ])
 
 
@@ -781,6 +796,52 @@ async def cmd_logs(update: Update, ctx):
         ("🧾 recent warnings/errors:\n" + "\n".join(bad))[:4000])
 
 
+_ROUTE_ICON = {"free": "🎈", "claude": "🧠"}
+
+
+def _route_line(rec: dict) -> str:
+    """One router-log record → a phone-friendly line."""
+    icon = _ROUTE_ICON.get(rec.get("route"), "•")
+    who = rec.get("provider") or (rec.get("tier") or "claude")
+    lat = rec.get("latency_ms") or 0
+    lat_s = f" {lat/1000:.1f}s" if lat else ""
+    prev = (rec.get("preview") or "").replace("\n", " ")[:40]
+    ok = "" if rec.get("ok", True) else " ⚠️"
+    return f'{icon} {rec.get("route")}·{who}{lat_s}{ok} "{prev}"'
+
+
+async def _router_card() -> tuple[str, InlineKeyboardMarkup]:
+    cfg = router.load_config()
+    healthy = await router.classifier_health()
+    usage = router.usage_today()
+    used = " · ".join(f"{p}:{n}" for p, n in sorted(usage.items())) or "—"
+    recent = router.recent_decisions(3)
+    lines = [
+        "🎈 **Model router**",
+        f"mode: {cfg.mode} · tag: {'on' if cfg.tag_replies else 'off'} · "
+        f"classifier {'✓' if healthy else '✗'} (Ollama)",
+        f"today: {used}",
+    ]
+    if recent:
+        lines.append("recent:")
+        lines += ["  " + _route_line(r) for r in recent]
+    return "\n".join(lines), router_kb(cfg)
+
+
+async def cmd_router(update: Update, ctx):
+    text, kb = await _router_card()
+    await update.message.reply_text(text[:4000], reply_markup=kb)
+
+
+async def cmd_routes(update: Update, ctx):
+    recent = router.recent_decisions(10)
+    if not recent:
+        await update.message.reply_text("🎈 no routing decisions logged yet")
+        return
+    lines = ["🎈 last routing decisions:"] + [_route_line(r) for r in recent]
+    await update.message.reply_text("\n".join(lines)[:4000])
+
+
 async def cmd_watch(update: Update, ctx):
     """Watch a file/folder/git-repo for changes (issue #6)."""
     from .watchers import Watcher, compute_state, detect_kind
@@ -1280,6 +1341,9 @@ async def on_callback(update: Update, ctx):
         await s.restart(resume=True, note="")
     elif data == "menu:model":
         await _edit(q, "Pick a model (applies live):", model_kb(s.cfg.model))
+    elif data == "menu:router":
+        text, kb = await _router_card()
+        await _edit(q, text[:4000], kb)
     elif data == "menu:cmds":
         await _edit(q, "Send a command to Claude:", cmds_kb(s))
     elif data == "menu:features":
@@ -1345,6 +1409,17 @@ async def on_callback(update: Update, ctx):
         await _edit(q, text[:4000], kb)
     elif data == "job:refresh":
         text, kb = jobs_kb(m)
+        await _edit(q, text[:4000], kb)
+    elif data.startswith("rt:"):
+        cfg = router.load_config()
+        sub = data.split(":")
+        if len(sub) >= 3 and sub[1] == "mode" and sub[2] in ("off", "free_only", "full"):
+            cfg.mode = sub[2]
+            router.save_config(cfg)
+        elif len(sub) >= 3 and sub[1] == "tag":
+            cfg.tag_replies = sub[2] == "1"
+            router.save_config(cfg)
+        text, kb = await _router_card()
         await _edit(q, text[:4000], kb)
     elif data.startswith("pgc:"):
         parts_pg = data.split(":")
