@@ -405,7 +405,22 @@ _ANSWER_SYS = (
 )
 
 SHORT_NAME = {"gemini": "gemini", "openrouter": "gemma", "groq": "groq",
-              "ollama": "local"}
+              "ollama": "local", "gemma-google": "gemma", "nvidia": "nvidia",
+              "cerebras": "cerebras"}
+
+# Some open models (Gemma 4, R1-style) leak chain-of-thought into content as
+# <thought>/<think> blocks — strip them; an unclosed tag (reasoning ate the
+# token budget) drops the tail so the caller can skip to the next provider.
+_REASONING_RE = re.compile(r"<(thought|think|thinking)>.*?</\1>\s*",
+                           re.DOTALL | re.IGNORECASE)
+
+
+def _strip_reasoning(ans: str) -> str:
+    out = _REASONING_RE.sub("", ans)
+    m = re.search(r"<(thought|think|thinking)>", out, re.IGNORECASE)
+    if m:
+        out = out[:m.start()]
+    return out
 
 
 async def _chat(base_url: str, key: str, model: str, messages: list[dict],
@@ -470,13 +485,16 @@ async def answer_free(text: str, session, decision: Decision) -> tuple[str, str]
                 log.debug("answer via %s failed: %s", name, e)
             latency_ms = int((time.monotonic() - t0) * 1000)
             if ok and ans:
-                cleaned = ans.strip()
+                cleaned = _strip_reasoning(ans).strip()
                 short = SHORT_NAME.get(name, name)
-                if cleaned == "ROUTE_TO_CLAUDE" or not cleaned:
+                if cleaned == "ROUTE_TO_CLAUDE":
                     _log_decision(session, text, decision, provider=short,
                                   latency_ms=latency_ms, ok=False,
                                   reason="model deferred to claude")
                     return None                    # model itself punted
+                if not cleaned:                    # only reasoning, no answer
+                    log.debug("answer via %s empty after reasoning strip", name)
+                    continue
                 _bump_usage(name)
                 _log_decision(session, text, decision, provider=short,
                               latency_ms=latency_ms, ok=True,
