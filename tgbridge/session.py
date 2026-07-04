@@ -246,9 +246,10 @@ class AgentSession:
         self._turn_had_tools = False
         self._shell_calls: dict[str, bool] = {}   # tool_use_id -> shell? (Bash/PS)
         # model router (free-model side channel): rolling (user, assistant≤300)
-        # pairs feed the free model real context; free_notes are quick side-model
-        # exchanges not yet told to Claude; _turn_model is a per-turn tier pick
-        # for full mode (agents on auto) applied in _send_turn.
+        # pairs feed the free model + classifier real context; _turn_model is a
+        # per-turn tier pick for full mode (agents on auto) applied in _send_turn.
+        # free_notes is retained (unused) — the [FYI] handoff to Claude was
+        # dropped as noise; the deque above is the only side-model context kept.
         self.free_history: deque = deque(maxlen=8)
         self.free_notes: list = []
         self._turn_model: str = ""
@@ -522,12 +523,11 @@ class AgentSession:
         body = f"🎈 {provider_short} · {ans}" if cfg.tag_replies else ans
         self.outbox.emit(body)
         self._react("👍")
-        # keep the free model's own context, and stash a note so Claude's next
-        # real turn learns what was said on the side.
+        # keep the free model's own context (classifier + free-model history);
+        # the free_notes handoff to Claude is intentionally dropped (noise).
         q = (decision.text or "")[:300]
         a = (ans or "")[:300]
         self.free_history.append((q, a))
-        self.free_notes.append(f"Q:{q[:180]} → A:{a[:180]}")
         return None
 
     async def collect(self, text: str, timeout: float = 300.0) -> str:
@@ -589,14 +589,9 @@ class AgentSession:
         # (pop_nudge returns "" if unchanged) so we never spam the turn stream.
         nudge = self.mood.pop_nudge()
         sent = f"[mood — {nudge}]\n{text}" if nudge else text
-        # free-context handoff: tell Claude what the side model already answered
-        # since its last turn, so its world stays consistent. Then clear it.
-        if self.free_notes:
-            notes = self.free_notes[:5]
-            self.free_notes = []
-            block = " ".join(n[:200] for n in notes)
-            sent = ("[FYI — quick side-model exchanges since your last turn: "
-                    f"{block}]\n{sent}")
+        # free-context handoff DISABLED: the [FYI — side-model exchanges] block
+        # was noise. We keep free_history in-memory (classifier context only) but
+        # no longer prepend the side-model Q/A to Claude's turn.
         self._react("👀")          # acknowledge: working on it
         try:
             await self.client.query(sent)
