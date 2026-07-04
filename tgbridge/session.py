@@ -511,8 +511,24 @@ class AgentSession:
                     and router.load_config().agent_mode(self.cfg.name) == "full"
                     and self.cfg.model == ""):
                 self._turn_model = decision.tier
-            router.log_claude(self, decision.text, decision)
-            return decision.text
+            # prompt-refinement stage: rewrite task-shaped prompts before Claude
+            # sees them. Fully wrapped — any failure falls through to the original
+            # text (a refine bug must never drop or corrupt a message).
+            final = decision.text
+            try:
+                cfg = router.load_config()
+                if router.should_refine(final, decision, cfg):
+                    res = await router.refine(final, self, cfg)
+                    if res:
+                        refined, changed = res
+                        if changed:
+                            if cfg.refine.get("show", True):
+                                self.outbox.emit(f"✍️ ניסחתי מחדש:\n{refined}")
+                            final = refined
+            except Exception as e:
+                log.warning("refine failed, using original: %s", e)
+            router.log_claude(self, final, decision)   # log the text actually sent
+            return final
         # free route
         self._react("👀")
         res = await router.answer_free(decision.text, self, decision)

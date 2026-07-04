@@ -1016,6 +1016,181 @@ async def test_router_failsafe_feed():
           sent == ["hello world"], str(sent))
 
 
+async def test_router_should_refine():
+    from tgbridge import router
+    cfg = router.RouterConfig()   # defaults: refine enabled, mode auto, min 40
+
+    def dec(route="claude", source="heuristic", refine_skip=False, text=""):
+        return router.Decision(route=route, source=source,
+                               refine_skip=refine_skip, text=text)
+
+    # task-shaped Hebrew claude prompt -> refine
+    t = "תבנה סקריפט שמסכם קבצים"
+    check("refine: task-shaped HE -> True",
+          router.should_refine(t, dec(text=t), cfg))
+    # short chat -> not refined (too short / not task-shaped)
+    t2 = "מה שלומך"
+    check("refine: short chat -> False",
+          not router.should_refine(t2, dec(text=t2), cfg))
+    # !raw override (refine_skip) -> not refined
+    t3 = "תבנה סקריפט שמסכם קבצים בבקשה עכשיו"
+    check("refine: !raw refine_skip -> False",
+          not router.should_refine(t3, dec(text=t3, refine_skip=True), cfg))
+    # slash command -> not refined
+    check("refine: slash -> False",
+          not router.should_refine("/status now please build", dec(text="/status"), cfg))
+    # bracket context -> not refined
+    bt = "[replying to: foo] please build a thing that runs and tests"
+    check("refine: bracket context -> False",
+          not router.should_refine(bt, dec(text=bt), cfg))
+    # forced source (!c etc.) -> not refined
+    check("refine: forced source -> False",
+          not router.should_refine(t, dec(source="forced", text=t), cfg))
+    # free route -> not refined
+    check("refine: free route -> False",
+          not router.should_refine(t, dec(route="free", text=t), cfg))
+    # mode off -> not refined
+    cfg_off = router.RouterConfig()
+    cfg_off.refine = {**cfg_off.refine, "mode": "off"}
+    check("refine: mode off -> False",
+          not router.should_refine(t, dec(text=t), cfg_off))
+    # mode always makes a short (>=40 chars) non-task claude prompt refine
+    long_chat = "אני תוהה מה דעתך על החיים והיקום והכל בכלל היום"  # >=40, no verb
+    cfg_always = router.RouterConfig()
+    cfg_always.refine = {**cfg_always.refine, "mode": "always"}
+    check("refine: mode always -> True for non-task",
+          router.should_refine(long_chat, dec(text=long_chat), cfg_always))
+    check("refine: mode auto -> False for same non-task",
+          not router.should_refine(long_chat, dec(text=long_chat), cfg))
+
+
+def test_router_rubric_loader():
+    from tgbridge import router
+    # from disk (the wiki files exist on this host)
+    r = _router_rubric_reset(router)
+    live = router._load_refine_rubric()
+    check("refine: rubric non-empty from disk", isinstance(live, str) and len(live) > 100,
+          f"len={len(live)}")
+    # missing dir -> embedded fallback
+    orig = router._REFINE_WIKI
+    router._REFINE_WIKI = [r"D:\__nope__\missing1.md", r"D:\__nope__\missing2.md"]
+    try:
+        _router_rubric_reset(router)
+        fb = router._load_refine_rubric()
+        check("refine: rubric falls back when files missing",
+              fb == router._REFINE_RUBRIC_FALLBACK, fb[:40])
+    finally:
+        router._REFINE_WIKI = orig
+        _router_rubric_reset(router)
+
+
+def _router_rubric_reset(router):
+    router._refine_rubric_cache = None
+    return router
+
+
+async def test_router_refine_guards():
+    from tgbridge import router
+    cfg = router.RouterConfig()
+    original = "תבנה לי סקריפט פייתון שסופר כמה פעמים כל מילה מופיעה בקובץ טקסט"
+
+    # force the refine chain to hit gemini only (has a key in env or not — we mock _chat)
+    orig_chat = router._chat
+    orig_rpd = router._rpd_spent
+    orig_rpm = router._rpm_throttled
+    orig_bump = router._bump_usage
+    orig_log = router._log_decision
+    router._rpd_spent = lambda p, c: False
+    router._rpm_throttled = lambda p: False
+    router._bump_usage = lambda n: None
+    router._log_decision = lambda *a, **k: None
+    # ensure at least the ollama provider (no env key) is tried by clearing key reqs:
+    # we simply give every provider no env_key so the loop always reaches _chat.
+    for p in cfg.providers:
+        p["env_key"] = ""
+
+    async def mk(ret):
+        async def _c(*a, **k):
+            return ret
+        return _c
+
+    try:
+        # fenced -> None
+        router._chat = await mk("```\nx\n```")
+        r = await router.refine(original, None, cfg)
+        check("refine guard: fenced-only -> None", r is None, repr(r))
+
+        # meta 'here is ...' -> None
+        router._chat = await mk("here is the prompt: do the thing")
+        r = await router.refine(original, None, cfg)
+        check("refine guard: 'here is' meta -> None", r is None, repr(r))
+
+        # ballooned way past the short-original cap (1200 chars) -> None
+        router._chat = await mk("א " * 800)   # ~1600 chars, well over the cap
+        r = await router.refine(original, None, cfg)
+        check("refine guard: ballooned -> None", r is None, repr(r))
+
+        # identical to original -> None
+        router._chat = await mk(original)
+        r = await router.refine(original, None, cfg)
+        check("refine guard: identical -> None", r is None, repr(r))
+
+        # clean restructured Hebrew rewrite -> (text, True)
+        good = ("מטרה: כתוב סקריפט פייתון שמקבל נתיב לקובץ טקסט וסופר כמה פעמים "
+                "מופיעה כל מילה. תנאי הצלחה: הרצה על קובץ לדוגמה מדפיסה את הספירות. "
+                "אמת בעצמך על ידי הרצת הסקריפט על קובץ קטן.")
+        router._chat = await mk(good)
+        r = await router.refine(original, None, cfg)
+        check("refine guard: clean rewrite -> (text, True)",
+              r is not None and r[1] is True and r[0] == good, repr(r)[:80])
+    finally:
+        router._chat = orig_chat
+        router._rpd_spent = orig_rpd
+        router._rpm_throttled = orig_rpm
+        router._bump_usage = orig_bump
+        router._log_decision = orig_log
+
+
+async def test_router_refine_failsafe():
+    """A raising refine() must not drop the message: _maybe_route returns the
+    ORIGINAL text so it still reaches Claude."""
+    from tgbridge import router
+    from tgbridge.session import AgentConfig, AgentSession
+
+    class FakeBot:
+        pass
+
+    class FakeMgr:
+        def __init__(self):
+            self.bot = FakeBot()
+            self.session_ids = {}
+            self.active = "w"
+            self.agents = {"w": AgentConfig(name="w")}
+        def add_cost(self, c):
+            return (0.0, None)
+
+    s = AgentSession(FakeMgr(), AgentConfig(name="w"), "w@p", 1, 1, None)
+    original = "תבנה לי סקריפט פייתון שסופר מילים בקובץ טקסט ומדפיס את התוצאה"
+
+    async def force_claude(text, sess):
+        return router.Decision(route="claude", source="heuristic", text=text)
+
+    async def boom(text, sess, cfg):
+        raise RuntimeError("refine exploded")
+
+    orig_classify = router.classify
+    orig_refine = router.refine
+    router.classify = force_claude
+    router.refine = boom
+    try:
+        out = await s._maybe_route(original)
+    finally:
+        router.classify = orig_classify
+        router.refine = orig_refine
+    check("refine failsafe: _maybe_route returns original on refine crash",
+          out == original, repr(out)[:80])
+
+
 if __name__ == "__main__":
     test_fmt()
     test_markers()
@@ -1061,6 +1236,10 @@ if __name__ == "__main__":
     asyncio.run(test_peer_protocol())
     asyncio.run(test_router_heuristics())
     asyncio.run(test_router_failsafe_feed())
+    asyncio.run(test_router_should_refine())
+    test_router_rubric_loader()
+    asyncio.run(test_router_refine_guards())
+    asyncio.run(test_router_refine_failsafe())
     print("-" * 40)
     print("ALL OK" if FAIL == 0 else f"{FAIL} FAILURES")
     sys.exit(1 if FAIL else 0)

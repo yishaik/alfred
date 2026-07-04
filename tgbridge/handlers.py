@@ -94,9 +94,15 @@ def model_kb(current: str) -> InlineKeyboardMarkup:
 
 
 def router_kb(cfg) -> InlineKeyboardMarkup:
-    """Inline controls for the /router card: mode radio + tag toggle."""
+    """Inline controls for the /router card: mode radio + tag toggle + refine."""
     def mlbl(name, val):
         return ("● " if cfg.mode == val else "") + name
+    refine = getattr(cfg, "refine", None) or {}
+    rmode = refine.get("mode", "auto")
+    rshow = refine.get("show", True)
+
+    def rlbl(name, val):
+        return ("● " if rmode == val else "") + name
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(mlbl("off", "off"), callback_data="rt:mode:off"),
          InlineKeyboardButton(mlbl("free-only", "free_only"), callback_data="rt:mode:free_only"),
@@ -104,6 +110,11 @@ def router_kb(cfg) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(f"🎈 tag {'ON' if cfg.tag_replies else 'off'}",
                               callback_data=f"rt:tag:{0 if cfg.tag_replies else 1}"),
          InlineKeyboardButton("🔄 refresh", callback_data="rt:show")],
+        [InlineKeyboardButton(rlbl("✍️ off", "off"), callback_data="rt:refine:off"),
+         InlineKeyboardButton(rlbl("auto", "auto"), callback_data="rt:refine:auto"),
+         InlineKeyboardButton(rlbl("always", "always"), callback_data="rt:refine:always"),
+         InlineKeyboardButton(f"👁 {'ON' if rshow else 'off'}",
+                              callback_data=f"rt:refshow:{0 if rshow else 1}")],
     ])
 
 
@@ -816,10 +827,14 @@ async def _router_card() -> tuple[str, InlineKeyboardMarkup]:
     usage = router.usage_today()
     used = " · ".join(f"{p}:{n}" for p, n in sorted(usage.items())) or "—"
     recent = router.recent_decisions(3)
+    refine = getattr(cfg, "refine", None) or {}
     lines = [
         "🎈 **Model router**",
         f"mode: {cfg.mode} · tag: {'on' if cfg.tag_replies else 'off'} · "
         f"classifier {'✓' if healthy else '✗'} (Ollama)",
+        f"✍️ ניסוח מחדש: {refine.get('mode', 'auto')}"
+        f" · show {'on' if refine.get('show', True) else 'off'}"
+        f" · (!raw לדילוג פעם אחת)",
         f"today: {used}",
     ]
     if recent:
@@ -1418,6 +1433,12 @@ async def on_callback(update: Update, ctx):
             router.save_config(cfg)
         elif len(sub) >= 3 and sub[1] == "tag":
             cfg.tag_replies = sub[2] == "1"
+            router.save_config(cfg)
+        elif len(sub) >= 3 and sub[1] == "refine" and sub[2] in ("off", "auto", "always"):
+            cfg.refine = {**(cfg.refine or {}), "mode": sub[2]}
+            router.save_config(cfg)
+        elif len(sub) >= 3 and sub[1] == "refshow":
+            cfg.refine = {**(cfg.refine or {}), "show": sub[2] == "1"}
             router.save_config(cfg)
         text, kb = await _router_card()
         await _edit(q, text[:4000], kb)
