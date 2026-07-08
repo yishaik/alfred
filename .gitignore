@@ -14,3 +14,4 @@ state/
 __pycache__/
 *.py[cod]
 .venv/
+collapse.log
