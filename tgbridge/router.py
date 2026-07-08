@@ -58,6 +58,22 @@ DEFAULT_PROVIDERS = [
     {"name": "openrouter", "base_url": "https://openrouter.ai/api/v1",
      "model": "google/gemma-4-31b-it:free", "env_key": "OPENROUTER_API_KEY",
      "rpm": 20, "rpd": 40, "max_chars": 6000},
+    # --- extra FREE OpenRouter models (auto-chain fallbacks; $0/token, share the
+    # account's free-tier budget so they add resilience, not capacity). Verified
+    # answering 2026-07-08; :free models are load-shed (429) at peak — the chain
+    # just falls through to the next. Add more by appending here (modular). ---
+    {"name": "or-gpt-oss-120b", "base_url": "https://openrouter.ai/api/v1",
+     "model": "openai/gpt-oss-120b:free", "env_key": "OPENROUTER_API_KEY",
+     "rpm": 15, "rpd": 200, "max_chars": 6000},
+    {"name": "or-qwen3-next-80b", "base_url": "https://openrouter.ai/api/v1",
+     "model": "qwen/qwen3-next-80b-a3b-instruct:free", "env_key": "OPENROUTER_API_KEY",
+     "rpm": 15, "rpd": 200, "max_chars": 6000},
+    {"name": "or-gpt-oss-20b", "base_url": "https://openrouter.ai/api/v1",
+     "model": "openai/gpt-oss-20b:free", "env_key": "OPENROUTER_API_KEY",
+     "rpm": 15, "rpd": 300, "max_chars": 6000},
+    {"name": "or-nemotron-nano-30b", "base_url": "https://openrouter.ai/api/v1",
+     "model": "nvidia/nemotron-3-nano-30b-a3b:free", "env_key": "OPENROUTER_API_KEY",
+     "rpm": 15, "rpd": 300, "max_chars": 6000},
     {"name": "groq", "base_url": "https://api.groq.com/openai/v1",
      "model": "openai/gpt-oss-120b", "env_key": "GROQ_API_KEY",
      "rpm": 30, "rpd": 500, "max_chars": 4000},
