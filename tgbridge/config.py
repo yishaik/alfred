@@ -45,14 +45,24 @@ def system_drive_free_gb() -> float | None:
 
 
 def _load_env(path: Path) -> None:
-    """Minimal .env loader (KEY=VALUE lines, # comments); real env wins."""
+    """Minimal .env loader (KEY=VALUE lines, # comments).
+
+    A NON-EMPTY .env value overrides an inherited/leaked OS-env var of the same
+    name — .env is the intended source of truth, and a stale shadowing var (e.g.
+    an old OPENROUTER_API_KEY exported at logon) must not silently win. An EMPTY
+    .env value (`KEY=`) is a placeholder: it never clobbers an existing env var,
+    so `setdefault` is used there."""
     try:
         for raw in path.read_text(encoding="utf-8").splitlines():
             ln = raw.strip()
             if not ln or ln.startswith("#") or "=" not in ln:
                 continue
             k, _, v = ln.partition("=")
-            os.environ.setdefault(k.strip(), v.strip())
+            k, v = k.strip(), v.strip()
+            if v:
+                os.environ[k] = v          # .env wins over a stale OS-env value
+            else:
+                os.environ.setdefault(k, v)
     except FileNotFoundError:
         pass
 
