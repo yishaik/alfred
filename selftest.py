@@ -922,6 +922,25 @@ async def test_router_heuristics():
     check("router: quick Q classified without crash",
           d.route in ("free", "claude"), d.reason)
 
+    # --- external opt-in prefixes: strip + pin the right provider, bypass LLM ---
+    d = await h("!gpt מה בירת צרפת")
+    check("router: !gpt -> free+gpt-5.5 pin",
+          d.route == "free" and d.provider == "gpt-5.5" and d.source == "forced",
+          f"{d.route}/{d.provider}/{d.source}")
+    check("router: !gpt strips prefix", d.text == "מה בירת צרפת", repr(d.text))
+    d = await h("!gpt55 hi")
+    check("router: !gpt55 -> gpt-5.5", d.provider == "gpt-5.5", d.provider)
+    d = await h("!gpt54 hi")
+    check("router: !gpt54 -> gpt-5.4", d.provider == "gpt-5.4", d.provider)
+    d = await h("!glm שלום")
+    check("router: !glm -> glm-5.2 pin",
+          d.route == "free" and d.provider == "glm-5.2", f"{d.route}/{d.provider}")
+    check("router: !glm strips prefix", d.text == "שלום", repr(d.text))
+    # a pinned external provider is a FORCED heuristic decision — the LLM
+    # classifier is bypassed (source=='forced', provider set from the prefix).
+    check("router: pinned external bypasses classifier",
+          d.source == "forced" and bool(d.provider))
+
 
 def test_router_provider_skip():
     import os
@@ -954,6 +973,157 @@ def test_router_provider_skip():
     check("router: rpm not throttled when empty", not router._rpm_throttled(prov))
     router._rpm_record(prov); router._rpm_record(prov)
     check("router: rpm throttled when full", router._rpm_throttled(prov))
+
+    # the 3 external models are present in defaults, all tagged manual + paid.
+    ext = {p["name"]: p for p in cfg.providers
+           if p["name"] in ("gpt-5.5", "gpt-5.4", "glm-5.2")}
+    check("router: 3 external providers in defaults", len(ext) == 3, str(list(ext)))
+    check("router: external providers tagged manual",
+          all(p.get("manual") for p in ext.values()))
+    check("router: external providers use OpenRouter key",
+          all(p["env_key"] == "OPENROUTER_API_KEY" for p in ext.values()))
+    check("router: external providers have conservative daily caps",
+          all(0 < int(p["rpd"]) <= 200 for p in ext.values()),
+          str({n: p["rpd"] for n, p in ext.items()}))
+    # rpd guard applies to a manual provider exactly like any other.
+    gpt = ext["gpt-5.5"]
+    check("router: manual provider rpd spent at cap",
+          router._rpd_spent(gpt, {"gpt-5.5": gpt["rpd"]}))
+    check("router: manual provider rpd not spent under cap",
+          not router._rpd_spent(gpt, {"gpt-5.5": 0}))
+
+
+async def test_router_manual_excluded_from_auto():
+    """CRITICAL cost-safety: the default auto free-answer walk NEVER selects a
+    manual (paid) provider; a pinned provider selects ONLY that one."""
+    import os
+    from tgbridge import router
+
+    cfg = router.RouterConfig()
+    sess = _FakeSession()
+
+    called = []
+
+    async def fake_chat(base_url, key, model, messages, **kw):
+        called.append(model)
+        return "answer-ok"
+
+    orig_chat = router._chat
+    orig_bump = router._bump_usage
+    orig_log = router._log_decision
+    orig_rpd = router._rpd_spent
+    orig_rpm = router._rpm_throttled
+    router._chat = fake_chat
+    router._bump_usage = lambda n: None
+    router._log_decision = lambda *a, **k: None
+    router._rpd_spent = lambda p, c: False
+    router._rpm_throttled = lambda p: False
+    # give every provider a usable key path (no env_key) so the ONLY thing that
+    # can keep a manual provider out of the auto walk is the manual filter itself.
+    for p in cfg.providers:
+        p["env_key"] = ""
+    orig_load = router.load_config
+    router.load_config = lambda force=False: cfg
+    try:
+        # --- auto walk (no pin): must answer via a NON-manual provider ---
+        called.clear()
+        dec = router.Decision(route="free", source="llm", text="hi", provider="")
+        res = await router.answer_free("hi", sess, dec)
+        manual_models = {p["model"] for p in cfg.providers if p.get("manual")}
+        check("router: auto walk never calls a manual/paid model",
+              all(m not in manual_models for m in called),
+              f"called={called}")
+        check("router: auto walk still answers via a free provider",
+              res is not None and called, str(res))
+
+        # --- pinned external: calls ONLY that provider's model ---
+        called.clear()
+        dec = router.Decision(route="free", source="forced", text="hi",
+                              provider="glm-5.2")
+        res = await router.answer_free("hi", sess, dec)
+        check("router: pinned provider calls only its own model",
+              called == ["z-ai/glm-5.2"], f"called={called}")
+        check("router: pinned provider returns its answer",
+              res is not None and res[0] == "answer-ok", str(res))
+
+        # --- pinned external that ERRORS -> None (falls through to Claude) ---
+        called.clear()
+
+        async def boom_chat(*a, **k):
+            raise RuntimeError("provider down")
+        router._chat = boom_chat
+        dec = router.Decision(route="free", source="forced", text="hi",
+                              provider="gpt-5.5")
+        res = await router.answer_free("hi", sess, dec)
+        check("router: pinned provider error -> None (falls through to Claude)",
+              res is None, str(res))
+    finally:
+        router._chat = orig_chat
+        router._bump_usage = orig_bump
+        router._log_decision = orig_log
+        router._rpd_spent = orig_rpd
+        router._rpm_throttled = orig_rpm
+        router.load_config = orig_load
+
+
+async def test_router_picker_pin_failsafe():
+    """The /models picker sets a one-shot _external_pin. _maybe_route consumes
+    it (clears it), routes THIS turn to that provider, and a provider error must
+    still fall through to Claude with the ORIGINAL text (never drops)."""
+    from tgbridge import router
+    from tgbridge.session import AgentConfig, AgentSession
+
+    class FakeBot:
+        pass
+
+    class FakeMgr:
+        def __init__(self):
+            self.bot = FakeBot()
+            self.session_ids = {}
+            self.active = "w"
+            self.agents = {"w": AgentConfig(name="w")}
+        def add_cost(self, c):
+            return (0.0, None)
+
+    s = AgentSession(FakeMgr(), AgentConfig(name="w"), "w@p", 1, 1, None)
+    s._external_pin = "gpt-5.5"
+
+    seen = {}
+
+    async def fake_answer_free(text, sess, decision):
+        seen["provider"] = decision.provider
+        seen["source"] = decision.source
+        return None            # simulate provider failure -> fall through
+
+    orig = router.answer_free
+    router.answer_free = fake_answer_free
+    try:
+        out = await s._maybe_route("מה בירת צרפת")
+    finally:
+        router.answer_free = orig
+    check("picker pin: routed to pinned provider", seen.get("provider") == "gpt-5.5",
+          str(seen))
+    check("picker pin: forced source (classifier bypassed)",
+          seen.get("source") == "forced", str(seen))
+    check("picker pin: cleared after one turn (one-shot)", s._external_pin == "")
+    check("picker pin: provider failure falls through with original text",
+          out == "מה בירת צרפת", repr(out))
+    # a following turn with no pin must NOT route to an external provider.
+    seen.clear()
+    router.answer_free = fake_answer_free
+    routed_external = {"hit": False}
+
+    async def classify_free(text, sess):
+        return router.Decision(route="free", source="llm", text=text, provider="")
+    orig_classify = router.classify
+    router.classify = classify_free
+    try:
+        await s._maybe_route("מה שלומך")
+    finally:
+        router.answer_free = orig
+        router.classify = orig_classify
+    check("picker pin: next turn has no external pin",
+          seen.get("provider", "") == "", str(seen))
 
 
 def test_router_usage_rollover(tmp_dir):
@@ -1235,6 +1405,8 @@ if __name__ == "__main__":
     asyncio.run(test_collect())
     asyncio.run(test_peer_protocol())
     asyncio.run(test_router_heuristics())
+    asyncio.run(test_router_manual_excluded_from_auto())
+    asyncio.run(test_router_picker_pin_failsafe())
     asyncio.run(test_router_failsafe_feed())
     asyncio.run(test_router_should_refine())
     test_router_rubric_loader()

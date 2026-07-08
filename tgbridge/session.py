@@ -50,10 +50,14 @@ def _tok(n: int) -> str:
 
 
 def _pretty_model(m: str) -> str:
-    """claude-opus-4-8 / full ids -> a short friendly label."""
+    """claude-opus-4-8 / full ids -> a short friendly label. Most-specific ids
+    first so Opus 4.8 vs 4.7 and Sonnet 5 stay distinguishable in the UI."""
     low = (m or "").lower()
-    for key, label in (("opus", "Opus"), ("sonnet", "Sonnet"),
-                       ("haiku", "Haiku"), ("fable", "Fable")):
+    for key, label in (
+            ("opus-4-8", "Opus 4.8"), ("opus-4-7", "Opus 4.7"),
+            ("sonnet-5", "Sonnet 5"), ("fable-5", "Fable 5"),
+            ("opus", "Opus"), ("sonnet", "Sonnet"),
+            ("haiku", "Haiku"), ("fable", "Fable")):
         if key in low:
             return label
     return m
@@ -256,6 +260,10 @@ class AgentSession:
         self._last_applied_model: str = ""
         self._turn_user_text: str = ""     # raw user text of the in-flight turn
         self._turn_final_text: str = ""     # last assistant text of that turn
+        # one-shot external-model pin set by the /models picker: the NEXT user
+        # message is answered by this external (paid, opt-in) provider, then the
+        # pin clears. "" = no pin. Explicit prefixes (!gpt/!glm) bypass this.
+        self._external_pin: str = ""
 
     def _prefix(self) -> str:
         # label output whenever "who is talking" isn't obvious: any group/topic
@@ -504,7 +512,19 @@ class AgentSession:
 
         Wrapped by feed() in try/except; still fail-safe internally so a router
         hiccup can only ever fall through to Claude, never drop a message."""
-        decision = await router.classify(text, self)
+        # One-shot external-model pin from the /models picker: consume it (clears
+        # regardless of outcome) and, unless the user typed an explicit override
+        # prefix or a slash command, answer THIS turn with the pinned external
+        # (paid, opt-in) provider — bypassing the classifier. On any provider
+        # failure answer_free returns None and we fall through to Claude.
+        pin = self._external_pin
+        self._external_pin = ""
+        if pin and not text.lstrip().startswith(("!", "/")):
+            decision = router.Decision(
+                route="free", task="other", source="forced",
+                reason=f"picker-pinned {pin}", text=text, provider=pin)
+        else:
+            decision = await router.classify(text, self)
         # remember a per-turn tier pick for full mode (auto agents only)
         if decision.route == "claude":
             if (decision.tier

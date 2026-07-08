@@ -63,6 +63,20 @@ DEFAULT_PROVIDERS = [
      "rpm": 30, "rpd": 500, "max_chars": 4000},
     {"name": "ollama", "base_url": "http://127.0.0.1:11434/v1",
      "model": "qwen2.5:14b", "env_key": "", "rpm": 0, "rpd": 0, "max_chars": 6000},
+    # --- Agent-Arena external models (opt-in only, PAID via OpenRouter). ---
+    # "manual": true keeps them OUT of the default auto free-answer walk so an
+    # ordinary chat can never spend money on them — they are reachable ONLY by an
+    # explicit prefix (!gpt/!gpt54/!glm) or the /models picker (a pinned provider).
+    # Conservative per-day caps guard against a runaway paid loop.
+    {"name": "gpt-5.5", "base_url": "https://openrouter.ai/api/v1",
+     "model": "openai/gpt-5.5", "env_key": "OPENROUTER_API_KEY",
+     "rpm": 10, "rpd": 50, "max_chars": 8000, "manual": True},
+    {"name": "gpt-5.4", "base_url": "https://openrouter.ai/api/v1",
+     "model": "openai/gpt-5.4", "env_key": "OPENROUTER_API_KEY",
+     "rpm": 10, "rpd": 50, "max_chars": 8000, "manual": True},
+    {"name": "glm-5.2", "base_url": "https://openrouter.ai/api/v1",
+     "model": "z-ai/glm-5.2", "env_key": "OPENROUTER_API_KEY",
+     "rpm": 15, "rpd": 200, "max_chars": 8000, "manual": True},
 ]
 
 DEFAULT_CLASSIFIER = {
@@ -160,6 +174,8 @@ class Decision:
     source: str = "heuristic"    # heuristic | llm | forced | failsafe
     text: str = ""               # possibly prefix-stripped text to actually use
     refine_skip: bool = False    # !raw override: skip prompt-refinement for this turn
+    provider: str = ""           # pinned free-path provider name (external opt-in);
+                                 #   set -> answer_free calls ONLY that provider
 
 
 # tier words the LLM classifier may return -> Anthropic model ids
@@ -170,6 +186,12 @@ _TIER_MAP = {"light": "haiku", "medium": "claude-sonnet-5", "heavy": "opus",
 # Forced tier prefixes -> Anthropic model id (claude path).
 _FORCE_TIER = {"!opus": "opus", "!sonnet": "claude-sonnet-5",
                "!haiku": "haiku", "!fable": "claude-fable-5"}
+
+# Forced EXTERNAL provider prefixes -> provider name (free path, pinned to ONE
+# provider). These are PAID via OpenRouter; opt-in only. A pinned external
+# provider short-circuits the classifier entirely (see _heuristic below).
+_FORCE_PROVIDER = {"!gpt": "gpt-5.5", "!gpt55": "gpt-5.5",
+                   "!gpt54": "gpt-5.4", "!glm": "glm-5.2"}
 
 # Action / repo signal words that always mean "this needs the real agent".
 _ACTION_EN = re.compile(
@@ -223,6 +245,13 @@ def _heuristic(text: str, session) -> Decision | None:
     if head in _FORCE_TIER:
         return Decision("claude", _FORCE_TIER[head], "other",
                         f"forced {head}", "forced", rest)
+    if head in _FORCE_PROVIDER:
+        # Pinned external model (paid, opt-in). free route, classifier bypassed;
+        # answer_free honours decision.provider by calling ONLY that provider,
+        # then falls through to Claude on any failure (never drops the message).
+        prov = _FORCE_PROVIDER[head]
+        return Decision("free", "", "other", f"forced {head} ({prov})",
+                        "forced", rest, provider=prov)
 
     # 3. Slash commands / bracketed bridge context (file refs, replies).
     if low.startswith("/"):
@@ -480,7 +509,18 @@ async def answer_free(text: str, session, decision: Decision) -> tuple[str, str]
         messages.append({"role": "user", "content": text})
         deadline = time.monotonic() + 45.0
 
-        for prov in cfg.providers:
+        # A pinned provider (external opt-in via !gpt/!glm or the /models picker)
+        # calls ONLY that provider — never the auto chain. If it's not found the
+        # loop stays empty and we fall through to Claude (never silent).
+        pinned = getattr(decision, "provider", "") or ""
+        if pinned:
+            chain = [p for p in cfg.providers if p.get("name") == pinned]
+        else:
+            # Default auto walk: EXCLUDE manual/opt-in (paid) providers so an
+            # ordinary chat can never auto-spend on gpt/glm — cost safety.
+            chain = [p for p in cfg.providers if not p.get("manual")]
+
+        for prov in chain:
             if time.monotonic() >= deadline:
                 break
             name = prov.get("name", "?")

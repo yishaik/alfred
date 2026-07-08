@@ -254,6 +254,8 @@ def main():
         "brief": handlers.cmd_brief,
         "router": handlers.cmd_router,
         "routes": handlers.cmd_routes,
+        "model": handlers.cmd_model,
+        "models": handlers.cmd_models,
         "logs": handlers.cmd_logs,
     }
     for name, fn in cmds.items():

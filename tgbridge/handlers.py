@@ -81,15 +81,31 @@ def features_kb(s) -> InlineKeyboardMarkup:
 def model_kb(current: str) -> InlineKeyboardMarkup:
     def lbl(name, val):
         return ("● " if current == val else "") + name
-    # opus/haiku short aliases resolve to the latest (Opus 4.8 / Haiku 4.5). Sonnet 5
-    # and Fable 5 use dateless PINNED ids (not evergreen aliases), so pin them explicitly.
+    # Claude models = the durable SESSION model (subscription, set_model live).
+    # Pinned dateless ids for the Agent-Arena entries (Opus 4.8/4.7, Sonnet 5,
+    # Fable 5); Haiku stays the evergreen alias. External (paid) models live in a
+    # SEPARATE picker (🌐 חיצוניים) because they can't be a session model.
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(lbl("Opus", "opus"), callback_data="model:opus"),
-         InlineKeyboardButton(lbl("Sonnet 5", "claude-sonnet-5"), callback_data="model:claude-sonnet-5"),
-         InlineKeyboardButton(lbl("Haiku", "haiku"), callback_data="model:haiku"),
-         InlineKeyboardButton(lbl("Fable", "claude-fable-5"), callback_data="model:claude-fable-5")],
+        [InlineKeyboardButton(lbl("Opus 4.8", "claude-opus-4-8"), callback_data="model:claude-opus-4-8"),
+         InlineKeyboardButton(lbl("Opus 4.7", "claude-opus-4-7"), callback_data="model:claude-opus-4-7")],
+        [InlineKeyboardButton(lbl("Sonnet 5", "claude-sonnet-5"), callback_data="model:claude-sonnet-5"),
+         InlineKeyboardButton(lbl("Fable 5", "claude-fable-5"), callback_data="model:claude-fable-5"),
+         InlineKeyboardButton(lbl("Haiku", "haiku"), callback_data="model:haiku")],
         [InlineKeyboardButton(lbl("Default", ""), callback_data="model:"),
-         InlineKeyboardButton("⬅ Back", callback_data="menu:back")],
+         InlineKeyboardButton("🌐 חיצוניים", callback_data="menu:xmodel")],
+        [InlineKeyboardButton("⬅ Back", callback_data="menu:back")],
+    ])
+
+
+def xmodels_kb() -> InlineKeyboardMarkup:
+    """External (paid, opt-in via OpenRouter) models picker. Tapping one PINS the
+    NEXT user message to that provider (one-shot) — it is NOT the durable session
+    model (Claude models are). Callback data: xmodel:<provider>."""
+    def x(name, prov):
+        return InlineKeyboardButton(name, callback_data=f"xmodel:{prov}")
+    return InlineKeyboardMarkup([
+        [x("GPT-5.5", "gpt-5.5"), x("GPT-5.4", "gpt-5.4"), x("GLM-5.2", "glm-5.2")],
+        [InlineKeyboardButton("⬅ מודלים", callback_data="menu:model")],
     ])
 
 
@@ -837,6 +853,15 @@ async def _router_card() -> tuple[str, InlineKeyboardMarkup]:
         f" · (!raw לדילוג פעם אחת)",
         f"today: {used}",
     ]
+    # External (paid, opt-in via OpenRouter) models: prefixes + today's usage/cap.
+    ext = [p for p in (cfg.providers or []) if p.get("manual")]
+    if ext:
+        cap = " · ".join(
+            f"{p['name']} {usage.get(p['name'], 0)}/{p.get('rpd', 0)}" for p in ext)
+        lines.append(
+            "🌐 חיצוניים (בתשלום, OpenRouter, מכסה יומית): "
+            "!gpt→GPT-5.5 · !gpt54→GPT-5.4 · !glm→GLM-5.2  (או /models)")
+        lines.append(f"   היום/מכסה: {cap}")
     if recent:
         lines.append("recent:")
         lines += ["  " + _route_line(r) for r in recent]
@@ -855,6 +880,36 @@ async def cmd_routes(update: Update, ctx):
         return
     lines = ["🎈 last routing decisions:"] + [_route_line(r) for r in recent]
     await update.message.reply_text("\n".join(lines)[:4000])
+
+
+def _model_picker_text(s) -> str:
+    """Header for the Claude session-model picker (/model)."""
+    return (
+        "🧠 בחר מודל שיחה (Claude, מנוי — משתנה מיידית):\n"
+        f"נוכחי: {_pretty_model(s.cfg.model) or 'default'}\n"
+        "מודלי Claude = מודל השיחה הקבוע. GPT/GLM הם חיצוניים (OpenRouter, "
+        "בתשלום) ועונים על ההודעה הבאה בלבד — ראה 🌐 חיצוניים / /models.")
+
+
+def _xmodel_picker_text() -> str:
+    """Header for the external (paid) one-shot model picker (/models)."""
+    return (
+        "🌐 מודלים חיצוניים (OpenRouter — בתשלום לפי טוקן, מכסה יומית).\n"
+        "בחירה כאן עונה על ההודעה הבאה בלבד (פעם אחת), לא משנה את מודל השיחה.\n"
+        "קיצורים בצ'אט: !gpt / !gpt54 / !glm.")
+
+
+async def cmd_model(update: Update, ctx):
+    """Claude session-model picker (durable, subscription)."""
+    s = await _session(update, ctx)
+    await update.message.reply_text(
+        _model_picker_text(s), reply_markup=model_kb(s.cfg.model))
+
+
+async def cmd_models(update: Update, ctx):
+    """External one-shot model picker (paid, opt-in via OpenRouter)."""
+    await update.message.reply_text(
+        _xmodel_picker_text(), reply_markup=xmodels_kb())
 
 
 async def cmd_watch(update: Update, ctx):
@@ -1355,7 +1410,9 @@ async def on_callback(update: Update, ctx):
                        "restarting session…", panel_kb(s))
         await s.restart(resume=True, note="")
     elif data == "menu:model":
-        await _edit(q, "Pick a model (applies live):", model_kb(s.cfg.model))
+        await _edit(q, _model_picker_text(s), model_kb(s.cfg.model))
+    elif data == "menu:xmodel":
+        await _edit(q, _xmodel_picker_text(), xmodels_kb())
     elif data == "menu:router":
         text, kb = await _router_card()
         await _edit(q, text[:4000], kb)
@@ -1386,6 +1443,18 @@ async def on_callback(update: Update, ctx):
         else:
             applied = "after /restart"
         await _edit(q, f"🧠 model → {model or 'default'} ({applied})", panel_kb(s))
+    elif data.startswith("xmodel:"):
+        prov = data.split(":", 1)[1]
+        # one-shot pin: the NEXT user message is answered by this external
+        # (paid, opt-in) provider, then the pin clears. Not the session model.
+        s._external_pin = prov
+        pretty = {"gpt-5.5": "GPT-5.5", "gpt-5.4": "GPT-5.4",
+                  "glm-5.2": "GLM-5.2"}.get(prov, prov)
+        await _edit(
+            q,
+            f"🌐 ההודעה הבאה תיענה ע\"י {pretty} (חיצוני, OpenRouter — בתשלום, "
+            f"פעם אחת). לביטול: שלח /model או תבחר Default.",
+            panel_kb(s))
     elif data.startswith("voi:"):
         v = data.split(":", 1)[1]
         s.cfg.voice = v
