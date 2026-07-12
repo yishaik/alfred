@@ -1,8 +1,18 @@
-"""Telegram handlers: bridge commands, callbacks, media, voice."""
+"""Telegram handlers: bridge commands, callbacks, media, voice.
+
+Purpose:  Every Telegram message/command the user sends is dispatched here.
+Inputs:   PTB Update + ContextTypes; reads AgentManager from bot_data["mgr"].
+Outputs:  Delegates to session.py (turns) / outbox.py (sends) / scheduler.py (jobs).
+Key fns:  handle_message, handle_command, handle_callback, handle_voice.
+Deps:     manager, session, outbox, scheduler, router, voice, fmt, guards, metrics.
+Note:     Anti-loop guard (_SEEN_MSGS) blocks bot-to-bot Telegram ping-pong.
+Updated:  2026-07-12
+"""
 
 import asyncio
 import logging
 import re
+from collections import deque
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -23,6 +33,20 @@ CURATED_CMDS = ["clear", "compact", "context", "usage", "cost", "review",
 
 def mgr(ctx: ContextTypes.DEFAULT_TYPE) -> AgentManager:
     return ctx.application.bot_data["mgr"]
+
+
+# --- anti-loop guards (bot-to-bot Telegram chatter) ------------------------- #
+# In a shared group (e.g. Alfred @openrobinbot + Donna @hiburimbot) each bot is
+# an admin and therefore receives the OTHER bot's messages. Reacting to them
+# creates an endless task-spec ping-pong. Rule: never react to a message whose
+# author is a bot (incl. self) — inter-agent coordination goes over the /msg
+# peer bus, never Telegram. Plus a small dedupe cache so a re-delivered
+# (chat_id, message_id) is only processed once.
+_SEEN_MSGS: deque = deque(maxlen=1024)
+
+
+def _from_bot(msg) -> bool:
+    return bool(msg and msg.from_user and msg.from_user.is_bot)
 
 
 def _route(update: Update) -> tuple[int, int | None]:
@@ -1191,8 +1215,15 @@ async def cmd_remind(update: Update, ctx):
 # Messages
 # --------------------------------------------------------------------------- #
 async def on_text(update: Update, ctx):
-    s = await _session(update, ctx)
     msg = update.message
+    # anti-loop: never react to a bot-authored message; drop re-delivered ids.
+    if _from_bot(msg):
+        return
+    key = (update.effective_chat.id, msg.message_id)
+    if key in _SEEN_MSGS:
+        return
+    _SEEN_MSGS.append(key)
+    s = await _session(update, ctx)
     text = msg.text
     # Resolve a pending "Other / type your answer" question without re-feeding Claude
     for qid, st in list(s.questions.items()):
@@ -1217,6 +1248,8 @@ async def on_text(update: Update, ctx):
 async def on_edited(update: Update, ctx):
     msg = update.edited_message
     if not msg or not msg.text:
+        return
+    if _from_bot(msg):   # anti-loop: ignore edits authored by another bot
         return
     s = await mgr(ctx).session_for_route(update.effective_chat.id,
                                          msg.message_thread_id)

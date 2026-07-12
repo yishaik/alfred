@@ -1,4 +1,13 @@
-"""Full-text search over local session transcripts (~/.claude/projects)."""
+"""Full-text search over local session transcripts (~/.claude/projects).
+
+Purpose:  Lets the bridge search past conversation history by keyword.
+Inputs:   query string; reads JSONL transcript files from Claude's project dirs.
+Outputs:  List of matching snippets with session path + turn index.
+Key fns:  search_transcripts(query, limit) -> list[dict].
+Deps:     claude_agent_sdk.project_key_for_directory; no bridge-internal deps.
+Note:     Reads Claude Code's own transcript format (content blocks as JSONL).
+Updated:  2026-07-12
+"""
 
 import json
 import logging

@@ -1,4 +1,13 @@
-"""Wiring: build the Telegram application, the manager, scheduler and peer bus."""
+"""Wiring: build the Telegram application, the manager, scheduler and peer bus.
+
+Purpose:  Entry point after supervisor.py; registers all handlers and starts polling.
+Inputs:   BOT_TOKEN, CHAT_ID, GROUP_ID from config; STATE_DIR for persistence.
+Outputs:  Running PTB Application; AgentManager + Scheduler + PeerBus in bot_data.
+Key fns:  main() — builds app, registers CommandHandlers, launches post_init / polling.
+Deps:     handlers, manager, scheduler, peers, config.
+Note:     BOT_COMMANDS list is Hebrew UI strings; command names stay /english.
+Updated:  2026-07-12
+"""
 
 import asyncio
 import logging
