@@ -1,6 +1,7 @@
 """Dream mode — an overnight pass that tidies up and prepares the morning (#9).
 
-While you sleep, Alfred does three quiet things:
+While you sleep, Alfred does four quiet things:
+  * synthesise memory — consolidate durable context and retire stale notes
   * summarise the day  — reuses the daily digest (#7)
   * clean state        — state backup + memory decay (run by the manager)
   * prepare an agenda  — what's scheduled for the next day
@@ -14,6 +15,7 @@ import re
 from pathlib import Path
 
 from .digest import build_digest
+from .memory_dreaming import schedule_once
 
 AGENDA_HORIZON_S = 86400.0      # how far ahead the agenda looks (24h)
 BRAIN_RAW = Path("D:/projects/second-brain/raw")   # x-reader → Second Brain captures
@@ -81,8 +83,11 @@ def build_agenda(jobs: list, now_ts: float,
 
 
 def dream_brief(mgr, now_ts: float) -> str:
-    """The morning brief: overnight Second Brain captures, open tasks, yesterday's
-    recap, and the day's agenda."""
+    """The morning brief plus a non-blocking memory consolidation pass."""
+    # Memory synthesis is deliberately detached from brief delivery: a slow or
+    # failed model call must never delay the user's morning message.
+    schedule_once(mgr)
+
     parts = ["🌙 𝗺𝗼𝗿𝗻𝗶𝗻𝗴 𝗯𝗿𝗶𝗲𝗳"]
     for section in (second_brain_overnight(now_ts), open_todos(mgr)):
         if section:
