@@ -1,10 +1,10 @@
 ---
 type: Module
 title: memory.py — long-term agent memory
-description: Pinned/note/fact items that survive restarts, are injected into every session, and decay over time.
+description: Pinned/note/fact items that survive restarts, plus nightly synthesis that keeps searchable memory current.
 resource: tgbridge/memory.py
 tags: [module, memory]
-timestamp: 2026-06-17T00:00:00Z
+timestamp: 2026-07-20T00:00:00Z
 ---
 
 # Responsibility
@@ -13,9 +13,14 @@ and editable via the `mcp__bridge__remember/forget/recall` [tools](/components/b
 
 # Key behaviors
 - Item kinds: pinned, note, fact — persisted across restarts.
-- Decay: old notes collapse to summaries, then drop from injection.
-- Pinned items are exempt from decay.
+- Pinned items are always injected and may only be changed explicitly.
+- Notes/facts are stored in the Napkin vault and recalled with BM25 search.
+- Nightly memory dreaming compares recent turns with the vault, merges durable
+  context, and retires uniquely identified stale non-pinned notes.
+- The dreaming model has no tools; its JSON plan is validated locally before
+  any mutation, and changes are logged under `state/memory-dreaming-log.jsonl`.
 
 # Collaborators
-Pure logic; persisted by the [manager](/components/manager.md). Complemented by the
+Persisted by the [manager](/components/manager.md), consolidated by
+[`memory_dreaming.py`](/components/memory-dreaming.md), and complemented by the
 [contacts](/components/mini-apps/contacts.md) book.
