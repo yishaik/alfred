@@ -146,7 +146,7 @@ def _normalize_plan(raw: dict | None) -> dict:
 
     remaining = MAX_OPERATIONS - len(upserts)
     source = raw.get("deletes", []) if isinstance(raw.get("deletes"), list) else []
-    for item in source if remaining > 0 else []:
+    for item in (source if remaining > 0 else []):
         if isinstance(item, str):
             item = {"match": item}
         if not isinstance(item, dict):
@@ -238,13 +238,17 @@ def _apply_plan(memory, plan: dict) -> dict:
     for deletion in plan.get("deletes", []):
         match = deletion["match"]
         low = match.lower()
-        matches = [it for it in memory.items
-                   if getattr(it, "kind", "") != "pinned"
-                   and low in str(getattr(it, "text", "")).lower()]
-        if len(matches) != 1:
+        items = list(memory.items)
+        matches = [(idx, it) for idx, it in enumerate(items)
+                   if low in str(getattr(it, "text", "")).lower()]
+        # The substring must identify exactly one item in the entire vault, and
+        # that item must not be pinned. Delete by list index so Memory.remove()
+        # cannot accidentally select an earlier pinned substring match.
+        if len(matches) != 1 or getattr(matches[0][1], "kind", "") == "pinned":
             skipped.append(f"delete:{match[:80]}")
             continue
-        text = memory.remove(match)
+        idx, _ = matches[0]
+        text = memory.remove(str(idx + 1))
         if text:
             removed.append(_clean(text))
 
@@ -400,14 +404,22 @@ class MemoryDreamer:
             state = load_json(STATE_FILE, {}) or {}
             if not isinstance(state, dict):
                 state = {}
-            agents_state = state.setdefault("agents", {})
+            agents_state = state.get("agents")
+            if not isinstance(agents_state, dict):
+                agents_state = {}
+                state["agents"] = agents_state
             totals = {"agents": 0, "turns": 0, "added": 0, "removed": 0,
                       "cost_usd": 0.0, "errors": 0}
 
             for agent, cfg in list(getattr(self.manager, "agents", {}).items()):
-                entry = agents_state.setdefault(agent, {})
+                entry = agents_state.get(agent)
+                if not isinstance(entry, dict):
+                    entry = {}
+                    agents_state[agent] = entry
                 seen_list = entry.get("seen", [])
-                seen = set(seen_list if isinstance(seen_list, list) else [])
+                if not isinstance(seen_list, list):
+                    seen_list = []
+                seen = set(seen_list)
                 turns, hashes = self._turns_for(agent, seen)
                 memory = self.manager.memory_for(agent)
                 snapshot = _memory_snapshot(memory)
@@ -430,10 +442,12 @@ class MemoryDreamer:
                     totals["added"] += len(applied["added"])
                     totals["removed"] += len(applied["removed"])
 
-                    entry["seen"] = (list(seen_list) + hashes)[-SEEN_HASH_LIMIT:]
+                    entry["seen"] = list(dict.fromkeys(seen_list + hashes))[-SEEN_HASH_LIMIT:]
                     entry["last_run"] = _iso_now()
                     entry["last_summary"] = plan.get("summary", "")
                     entry["last_changes"] = applied
+                    entry.pop("last_error", None)
+                    entry.pop("last_error_at", None)
                     self._audit(agent, len(turns), plan, applied)
                     log.info("memory dream %s: %d turns, +%d -%d ($%.4f)",
                              agent, len(turns), len(applied["added"]),
