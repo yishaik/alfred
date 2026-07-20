@@ -24,6 +24,11 @@ class FakeMemory:
         return item
 
     def remove(self, ref):
+        if str(ref).isdigit():
+            idx = int(ref) - 1
+            if 0 <= idx < len(self._items):
+                return self._items.pop(idx).text
+            return None
         low = ref.lower()
         for idx, item in enumerate(self._items):
             if low in item.text.lower():
@@ -68,6 +73,20 @@ def test_apply_protects_pinned_and_ambiguous_deletes():
     assert len(result["skipped"]) == 2
     assert result["added"] == ["User prefers quiet hotels"]
     assert any(item.kind == "pinned" for item in mem.items)
+
+
+def test_delete_never_falls_through_to_pinned_substring():
+    mem = FakeMemory([
+        Item("User lives in Tel Aviv", "pinned"),
+        Item("User lives in Tel Aviv during July", "note"),
+    ])
+    plan = _normalize_plan({
+        "deletes": [{"match": "User lives in Tel Aviv"}],
+    })
+    result = _apply_plan(mem, plan)
+    assert result["removed"] == []
+    assert len(result["skipped"]) == 1
+    assert [item.kind for item in mem.items] == ["pinned", "note"]
 
 
 def test_apply_unique_non_pinned_replacement():
