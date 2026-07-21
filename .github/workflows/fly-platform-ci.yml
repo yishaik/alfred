@@ -1,0 +1,49 @@
+name: Alfred Fly Platform CI
+
+on:
+  pull_request:
+    paths:
+      - "cloud/**"
+      - "tests/**"
+      - "Dockerfile.fly"
+      - "fly.toml"
+      - ".github/workflows/fly-platform-ci.yml"
+  push:
+    branches: [master]
+    paths:
+      - "cloud/**"
+      - "tests/**"
+      - "Dockerfile.fly"
+      - "fly.toml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements.txt pytest
+      - run: pytest -q tests/test_cloud_platform.py
+      - run: python -m compileall -q cloud
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.fly
+          push: false
+          tags: alfred-fly:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
