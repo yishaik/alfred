@@ -9,7 +9,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/data/home/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      bash ca-certificates curl git git-lfs gosu jq openssh-client tini unzip xz-utils \
+      bash ca-certificates curl git git-lfs gosu jq openssh-client passwd tini unzip xz-utils \
     && curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
