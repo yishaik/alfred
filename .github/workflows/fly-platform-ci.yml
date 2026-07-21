@@ -41,12 +41,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - name: Quiet checkout
+        shell: bash
+        run: |
+          git init -q .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch -q --depth=1 origin "${GITHUB_SHA}"
+          git checkout -q FETCH_HEAD
       - name: Build Fly image
         shell: bash
         run: |
           set +e
           docker build --progress=plain -f Dockerfile.fly -t alfred-fly:test . > /tmp/docker-build.log 2>&1
           status=$?
-          tail -n 120 /tmp/docker-build.log
+          if [ "$status" -ne 0 ]; then
+            echo "--- matched errors ---"
+            grep -Ei '(^|[^a-z])(error|failed|failure|not found|exit code|npm err|traceback)([^a-z]|$)' /tmp/docker-build.log | tail -n 35 || true
+            echo "--- build tail ---"
+            tail -n 35 /tmp/docker-build.log
+          else
+            tail -n 12 /tmp/docker-build.log
+          fi
           exit $status
