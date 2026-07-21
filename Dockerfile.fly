@@ -6,7 +6,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     HOME=/data/home \
-    PATH=/data/home/.local/bin:/usr/local/bin:/usr/bin:/bin
+    PATH=/data/home/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       bash ca-certificates curl git git-lfs gosu jq openssh-client passwd tini unzip xz-utils \
