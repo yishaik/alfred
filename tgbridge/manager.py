@@ -270,17 +270,40 @@ class AgentManager:
         scheduler deliveries when no topic session exists)."""
         return await self._get_session(name, f"{name}@p", CHAT_ID, None)
 
+    async def _notify_misroute(self, text: str) -> None:
+        """Warn about a scheduled-job routing fallback, deduped so a daily job
+        can't spam the same warning on every tick."""
+        seen = getattr(self, "_misroute_seen", None)
+        if seen is None:
+            seen = self._misroute_seen = set()
+        if text in seen:
+            return
+        seen.add(text)
+        try:
+            await self.bot.send_message(CHAT_ID, text, parse_mode="HTML")
+        except Exception:
+            log.exception("misroute notice failed")
+
     async def session_for_job(self, agent: str, chat_id: int | None,
                               thread_id: int | None) -> AgentSession:
         """Session for a scheduled job, honoring where it was created. A topic
         route whose binding has since been removed falls back to the agent's
         private-chat session rather than resurrecting a dead topic (A5)."""
         if agent not in self.agents:
-            agent = self.active if self.active in self.agents else "main"
+            # Silent re-pointing hid a live bug for weeks (a job targeting a deleted
+            # agent ran under the wrong cwd/model/memory). Tell the user once.
+            missing, agent = agent, (self.active if self.active in self.agents else "main")
+            log.warning("job route: agent %r is gone — running under %r", missing, agent)
+            await self._notify_misroute(
+                f"⚠️ עבודה מתוזמנת מכוונת לסוכן <b>{missing}</b> שלא קיים — "
+                f"רצה תחת <b>{agent}</b>. עדכן/י את ה-job.")
         skey = job_skey(agent, chat_id, thread_id)
         if not skey.endswith("@p") and self.topics.get(str(thread_id or 0)) != agent:
             log.warning("job route %s: topic binding gone — delivering to %s@p",
                         skey, agent)
+            await self._notify_misroute(
+                f"⚠️ עבודה מתוזמנת קשורה ל-topic {thread_id} שכבר לא קיים — "
+                f"נשלח לצ׳אט הפרטי של <b>{agent}</b>.")
             skey = f"{agent}@p"
         if skey.endswith("@p"):
             return await self._get_session(agent, skey, CHAT_ID, None)
@@ -398,8 +421,9 @@ class AgentManager:
         return "\n".join(lines)
 
     def backup_state(self) -> None:
-        """Daily zip of state/*.json (agents, sessions, jobs, costs, topics)
-        so a corrupted file is recoverable; keeps the newest 7."""
+        """Daily zip of state/*.json (agents, sessions, jobs, costs, topics) PLUS the
+        per-agent knowledge base under state/kb/ — that vault is the agents' long-term
+        memory and is gitignored, so this zip is its only copy. Keeps the newest 14."""
         try:
             import zipfile
             BACKUP_DIR.mkdir(exist_ok=True)
@@ -409,7 +433,12 @@ class AgentManager:
             with zipfile.ZipFile(name, "w", zipfile.ZIP_DEFLATED) as z:
                 for p in STATE_DIR.glob("*.json"):
                     z.write(p, p.name)
-            for old in sorted(BACKUP_DIR.glob("state-*.zip"))[:-7]:
+                kb = STATE_DIR / "kb"
+                if kb.is_dir():
+                    for p in kb.rglob("*"):
+                        if p.is_file():
+                            z.write(p, str(p.relative_to(STATE_DIR)).replace("\\", "/"))
+            for old in sorted(BACKUP_DIR.glob("state-*.zip"))[:-14]:
                 old.unlink()
             log.info("state backed up to %s", name.name)
         except Exception:
@@ -426,6 +455,15 @@ class AgentManager:
                 await asyncio.sleep((nxt - now).total_seconds())
                 self.backup_state()
                 self.decay_memories()
+                # Agent subprocesses inherit TEMP=state/tmp and leak whole dirs there;
+                # sweeping only at startup let it reach ~7 GB during a long uptime.
+                try:
+                    from .config import sweep_tmp
+                    n = await asyncio.to_thread(sweep_tmp)
+                    if n:
+                        log.info("tmp sweep removed %d stale entries", n)
+                except Exception:
+                    log.exception("tmp sweep failed")
                 await self.bot.send_message(CHAT_ID, self.health_text())
             except asyncio.CancelledError:
                 return

@@ -54,7 +54,7 @@ def _pretty_model(m: str) -> str:
     first so Opus 4.8 vs 4.7 and Sonnet 5 stay distinguishable in the UI."""
     low = (m or "").lower()
     for key, label in (
-            ("opus-4-8", "Opus 4.8"), ("opus-4-7", "Opus 4.7"),
+            ("opus-5", "Opus 5"), ("opus-4-8", "Opus 4.8"), ("opus-4-7", "Opus 4.7"),
             ("sonnet-5", "Sonnet 5"), ("fable-5", "Fable 5"),
             ("opus", "Opus"), ("sonnet", "Sonnet"),
             ("haiku", "Haiku"), ("fable", "Fable")):
@@ -493,6 +493,13 @@ class AgentSession:
         if echo:
             self.outbox.emit(f"▶️ {text}")
         if self.busy:
+            # deque(maxlen) silently evicts the OLDEST item — the opposite of this
+            # module's contract ("never silently dropped"). Refuse loudly instead.
+            if len(self.pending) >= self.pending.maxlen:
+                self.outbox.emit(
+                    f"🚦 התור מלא ({self.pending.maxlen}) — ההודעה הזו לא נקלטה. "
+                    "השתמש/י ב-/interrupt או המתן/י לסיום.")
+                return False
             self.pending.append((text, source))
             if source.kind == "user":
                 kb = InlineKeyboardMarkup([[InlineKeyboardButton(
@@ -1167,6 +1174,13 @@ class AgentSession:
         while True:
             try:
                 await asyncio.sleep(30)
+                # Revive the delivery loop if it ever died — otherwise the session
+                # keeps working while the user sees total silence.
+                try:
+                    if self.outbox.ensure_alive():
+                        self.outbox.emit("♻️ delivery loop was stuck — restarted it.")
+                except Exception:
+                    log.exception("outbox revival check failed")
                 if not self.busy:
                     continue
                 elapsed = time.monotonic() - self.turn_started

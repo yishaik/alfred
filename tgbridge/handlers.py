@@ -21,7 +21,7 @@ from . import metrics, router, voice
 from .config import (APP_LOG_FILE, AUDIT_FILE, GROUP_ID, INBOX, MAX_JOBS,
                      PEERS, authorized_chat)
 from .manager import AgentManager
-from .fmt import SEP
+from .fmt import SEP, fmt_duration
 from .session import TurnSource, _ctx_bar, _pretty_model
 
 log = logging.getLogger("bridge.handlers")
@@ -106,12 +106,12 @@ def model_kb(current: str) -> InlineKeyboardMarkup:
     def lbl(name, val):
         return ("● " if current == val else "") + name
     # Claude models = the durable SESSION model (subscription, set_model live).
-    # Pinned dateless ids for the Agent-Arena entries (Opus 4.8/4.7, Sonnet 5,
-    # Fable 5); Haiku stays the evergreen alias. External (paid) models live in a
-    # SEPARATE picker (🌐 חיצוניים) because they can't be a session model.
+    # Pinned dateless ids (Opus 5, Opus 4.8, Sonnet 5, Fable 5); Haiku stays the
+    # evergreen alias. External (paid) models live in a SEPARATE picker
+    # (🌐 חיצוניים) because they can't be a session model.
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(lbl("Opus 4.8", "claude-opus-4-8"), callback_data="model:claude-opus-4-8"),
-         InlineKeyboardButton(lbl("Opus 4.7", "claude-opus-4-7"), callback_data="model:claude-opus-4-7")],
+        [InlineKeyboardButton(lbl("Opus 5", "claude-opus-5"), callback_data="model:claude-opus-5"),
+         InlineKeyboardButton(lbl("Opus 4.8", "claude-opus-4-8"), callback_data="model:claude-opus-4-8")],
         [InlineKeyboardButton(lbl("Sonnet 5", "claude-sonnet-5"), callback_data="model:claude-sonnet-5"),
          InlineKeyboardButton(lbl("Fable 5", "claude-fable-5"), callback_data="model:claude-fable-5"),
          InlineKeyboardButton(lbl("Haiku", "haiku"), callback_data="model:haiku")],
@@ -278,9 +278,45 @@ async def cmd_panel(update: Update, ctx):
 async def cmd_status(update: Update, ctx):
     s = await _session(update, ctx)
     txt = _status_text(mgr(ctx))
+    # Surface delivery health: a dead outbox looks exactly like a quiet bridge.
+    try:
+        txt += f"\n📤 outbox: {'🟢 alive' if s.outbox.alive else '🔴 DEAD'}"
+    except Exception:
+        pass
     if s.stderr_tail:
         txt += "\n\nstderr tail:\n" + "\n".join(list(s.stderr_tail)[-5:])
     await update.message.reply_text(txt[:4000], reply_markup=panel_kb(s))
+
+
+async def cmd_version(update: Update, ctx):
+    """Which code is actually running — commit, dirty flag, uptime, model.
+    Without this you cannot tell whether an edit on disk is live."""
+    import subprocess, time as _t
+    from .config import ROOT
+
+    def _git(*a: str) -> str:
+        try:
+            r = subprocess.run(["git", "-C", str(ROOT), *a], capture_output=True,
+                               text=True, timeout=8)
+            return (r.stdout or "").strip()
+        except Exception:
+            return ""
+
+    s = await _session(update, ctx)
+    commit = _git("rev-parse", "--short", "HEAD") or "?"
+    subject = _git("log", "-1", "--format=%s")[:60]
+    dirty = [l for l in _git("status", "--porcelain").splitlines() if l.strip()]
+    started = getattr(ctx.application, "_bridge_started_at", None)
+    up = fmt_duration(_t.monotonic() - started) if started else "?"
+    lines = [
+        f"🏷 commit <code>{commit}</code> — {subject}",
+        f"📝 working tree: {'clean' if not dirty else f'{len(dirty)} uncommitted file(s) — NOT running'}",
+        f"⏱ bridge uptime: {up}",
+        f"🧠 model: {_pretty_model(s.cfg.model) or 'default'}",
+    ]
+    if dirty:
+        lines.append("\n" + "\n".join(f"  • {l[3:]}" for l in dirty[:8]))
+    await update.message.reply_text("\n".join(lines)[:4000], parse_mode="HTML")
 
 
 async def cmd_restart(update: Update, ctx):

@@ -7,16 +7,26 @@ runaway "schedule myself every minute" can't melt the API bill.
 """
 
 import asyncio
+import json
 import logging
+import os
 import time
 from datetime import datetime, timedelta
 
 import re
 
 from . import metrics
-from .config import JOBS_FILE, MAX_JOBS, MIN_RECUR_MINUTES, load_json, save_json
+from .config import (CHAT_ID, JOBS_FILE, MAX_JOBS, MIN_RECUR_MINUTES,
+                     STATE_DIR, load_json, save_json)
 from .markers import next_fire, parse_when
 from .session import TurnSource
+
+# External processes (e.g. the GitHub railway watcher sidecar) drop one JSON file
+# per event here; each tick we ingest + delete them as immediate prompt jobs.
+# This is a code-execution path into an auto-approving agent, so when
+# BRIDGE_WEBHOOK_SECRET is set every file must carry a matching "secret" field.
+WEBHOOK_INBOX = STATE_DIR / "webhook_inbox"
+WEBHOOK_SECRET = os.environ.get("BRIDGE_WEBHOOK_SECRET", "").strip()
 
 _UNTIL_RE = re.compile(r"\s+until\s+(\d{4}-\d{2}-\d{2})\s*$", re.IGNORECASE)
 
@@ -92,10 +102,55 @@ class Scheduler:
     def list_jobs(self) -> list[dict]:
         return sorted(self.jobs, key=lambda j: j["next_ts"])
 
+    def _ingest_webhook_inbox(self):
+        """Turn externally-dropped inbox files into immediate prompt jobs.
+        Defensive: one bad file never blocks the rest, and delete-before-inject
+        means a file can't double-fire."""
+        try:
+            files = sorted(WEBHOOK_INBOX.glob("*.json")) if WEBHOOK_INBOX.exists() else []
+        except Exception:
+            return
+        added = False
+        for f in files:
+            try:
+                item = json.loads(f.read_text(encoding="utf-8"))
+            except Exception:
+                item = None
+            try:
+                f.unlink()
+            except Exception:
+                pass
+            item = item or {}
+            text = str(item.get("text", "")).strip()
+            if not text:
+                continue
+            if WEBHOOK_SECRET and str(item.get("secret", "")) != WEBHOOK_SECRET:
+                log.warning("webhook inbox: rejected %s (bad/missing secret)", f.name)
+                continue
+            self.seq += 1
+            self.jobs.append({
+                "id": f"hook-{self.seq}",
+                "agent": item.get("agent", "main"),
+                # Never let a dropped file choose its own destination — always the
+                # owner's chat, so an injected file can't redirect output elsewhere.
+                "chat_id": CHAT_ID,
+                "thread_id": None,
+                "kind": "prompt",
+                "text": text[:2000],
+                "next_ts": time.time(),
+                "recur": None,
+                "until_ts": None,
+                "next_human": "now",
+            })
+            added = True
+        if added:
+            self._save()
+
     async def _loop(self):
         while True:
             try:
                 await asyncio.sleep(20)
+                self._ingest_webhook_inbox()
                 now = time.time()
                 due = [j for j in self.jobs if j["next_ts"] <= now]
                 for job in due:

@@ -35,6 +35,7 @@ log = logging.getLogger("bridge")
 BOT_COMMANDS = [
     ("panel", "לוח בקרה"),
     ("status", "מצב"),
+    ("version", "איזה קוד רץ"),
     ("interrupt", "עצירה"),
     ("restart", "אתחול session"),
     ("mute", "השתקת השיחה (שומר את ה-session)"),
@@ -76,7 +77,11 @@ BOT_COMMANDS = [
 
 
 async def post_init(app):
-    sweep_tmp()
+    import time as _t
+    app._bridge_started_at = _t.monotonic()   # read by /version
+    removed = sweep_tmp()
+    if removed:
+        log.info("startup tmp sweep removed %d stale entries", removed)
     m = AgentManager(app)
     app.bot_data["mgr"] = m
     free = system_drive_free_gb()
@@ -219,6 +224,7 @@ def main():
         "start": handlers.cmd_start,
         "panel": handlers.cmd_panel, "menu": handlers.cmd_panel,
         "status": handlers.cmd_status,
+        "version": handlers.cmd_version,
         "restart": handlers.cmd_restart,
         "interrupt": handlers.cmd_interrupt,
         "stop": handlers.cmd_stop,

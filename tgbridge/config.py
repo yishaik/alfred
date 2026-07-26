@@ -20,19 +20,39 @@ TMP_DIR = STATE_DIR / "tmp"
 TMP_DIR.mkdir(exist_ok=True)
 
 
-def sweep_tmp(max_age_hours: float = 24.0) -> None:
-    """Remove stale files from our own tmp dir (startup hygiene)."""
-    import time
+# Never sweep these — they are live working dirs, not leaked scratch.
+TMP_KEEP = {"claude"}
+
+
+def sweep_tmp(max_age_hours: float = 72.0) -> int:
+    """Remove stale entries from our own tmp dir.
+
+    Every agent subprocess inherits TEMP=this dir, so it accumulates whole
+    DIRECTORIES (browser profiles, PyInstaller _MEI* extractions, clones) — not
+    just files. Sweeping files only let it grow to ~7 GB unnoticed, so this
+    removes stale directories too. Returns the number of entries removed.
+    """
+    import time, shutil
     cutoff = time.time() - max_age_hours * 3600
+    removed = 0
     try:
         for p in TMP_DIR.iterdir():
+            if p.name in TMP_KEEP:
+                continue
             try:
-                if p.is_file() and p.stat().st_mtime < cutoff:
+                if p.stat().st_mtime >= cutoff:
+                    continue
+                if p.is_file():
                     p.unlink()
+                    removed += 1
+                elif p.is_dir():
+                    shutil.rmtree(p, ignore_errors=True)
+                    removed += 1
             except OSError:
-                pass
+                pass  # in use by a running agent — try again next sweep
     except OSError:
         pass
+    return removed
 
 
 def system_drive_free_gb() -> float | None:

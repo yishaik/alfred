@@ -61,6 +61,21 @@ class Outbox:
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._run())
 
+    @property
+    def alive(self) -> bool:
+        """True when the sender loop is running — surfaced by /status so a dead
+        delivery task is visible instead of looking like a quiet bridge."""
+        return bool(self._task and not self._task.done())
+
+    def ensure_alive(self) -> bool:
+        """Restart the sender if it died. Returns True if a revival happened."""
+        if self._task is not None and self._task.done():
+            exc = self._task.exception() if not self._task.cancelled() else None
+            log.error("outbox sender was dead (%s) — restarting", exc)
+            self._task = asyncio.create_task(self._run())
+            return True
+        return False
+
     async def stop(self, drain: bool = True):
         if not self._task:
             return
@@ -112,39 +127,49 @@ class Outbox:
 
     # -- sender loop --------------------------------------------------------- #
     async def _run(self):
+        """Delivery loop. NOTHING may escape here: if this task dies the session
+        keeps consuming Claude output while the user sees silence, with no error
+        anywhere. Every iteration is therefore wrapped, and a poisonous item is
+        dropped (after logging) rather than allowed to kill delivery."""
         pending: list[str] = []
         while True:
             try:
-                item = await asyncio.wait_for(
-                    self.queue.get(), timeout=BATCH_WINDOW if pending else None)
-            except asyncio.TimeoutError:
-                await self._flush(pending)
-                continue
-            kind = item[0]
-            if kind == "text":
-                pending.append(item[1])
-                if sum(len(x) for x in pending) > 3000:
+                try:
+                    item = await asyncio.wait_for(
+                        self.queue.get(), timeout=BATCH_WINDOW if pending else None)
+                except asyncio.TimeoutError:
                     await self._flush(pending)
-            elif kind == "sd":
-                await self._flush(pending)
-                await self._on_delta(item[1])
-            elif kind == "sc":
-                await self._flush(pending)
-                await self._on_close(item[1], item[2])
-            else:
-                await self._flush(pending)
-                if kind == "file":
-                    await self._send_file(item[1])
-                elif kind == "vc":
-                    await self._send_voice(item[1], item[2])
-                elif kind == "kb":
-                    msg = await self._safe_send(item[1][:TG_MAX],
-                                                reply_markup=item[2], html=True)
-                    if item[3] and msg:
-                        try:
-                            await item[3](msg)
-                        except Exception:
-                            log.exception("on_sent callback failed")
+                    continue
+                kind = item[0]
+                if kind == "text":
+                    pending.append(item[1])
+                    if sum(len(x) for x in pending) > 3000:
+                        await self._flush(pending)
+                elif kind == "sd":
+                    await self._flush(pending)
+                    await self._on_delta(item[1])
+                elif kind == "sc":
+                    await self._flush(pending)
+                    await self._on_close(item[1], item[2])
+                else:
+                    await self._flush(pending)
+                    if kind == "file":
+                        await self._send_file(item[1])
+                    elif kind == "vc":
+                        await self._send_voice(item[1], item[2])
+                    elif kind == "kb":
+                        msg = await self._safe_send(item[1][:TG_MAX],
+                                                    reply_markup=item[2], html=True)
+                        if item[3] and msg:
+                            try:
+                                await item[3](msg)
+                            except Exception:
+                                log.exception("on_sent callback failed")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("outbox item failed — dropping it, loop continues")
+                pending.clear()
 
     async def _flush(self, pending: list[str]):
         if not pending:

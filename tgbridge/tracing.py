@@ -38,6 +38,16 @@ def finish(skey: str, tool_use_id: str, status: str) -> None:
             "at": time.strftime("%H:%M:%S")}
     _recent.setdefault(skey, deque(maxlen=50)).append(span)
     try:
+        # One line per tool call with no rotation grew unbounded; cap it the same
+        # way the audit log is capped (nothing ever reads this file back).
+        if TRACES_FILE.exists() and TRACES_FILE.stat().st_size > 5 * 1024 * 1024:
+            TRACES_FILE.replace(TRACES_FILE.with_name(
+                f"{TRACES_FILE.stem}-{time.strftime('%Y%m%d-%H%M')}.jsonl"))
+            for old in sorted(TRACES_FILE.parent.glob(f"{TRACES_FILE.stem}-*.jsonl"))[:-2]:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
         with TRACES_FILE.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps({"skey": skey, **span}, ensure_ascii=False) + "\n")
     except Exception:
