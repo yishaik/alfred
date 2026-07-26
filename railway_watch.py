@@ -116,15 +116,38 @@ def check_once(my_login, state):
     return fresh
 
 
+def _log(msg: str) -> None:
+    """Runs under pythonw, so stderr goes nowhere — persist to a file instead,
+    otherwise this sidecar can fail silently for weeks."""
+    try:
+        line = f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {msg}\n"
+        p = STATE_DIR / "railway_watch.log"
+        if p.exists() and p.stat().st_size > 1_000_000:
+            p.replace(p.with_suffix(".log.old"))
+        with p.open("a", encoding="utf-8") as fh:
+            fh.write(line)
+    except OSError:
+        pass
+
+
 def main():
     once = "--once" in sys.argv
     my_login = _my_login()
+    _log(f"started (poll={POLL_SECONDS}s, repo={REPO}, login={my_login})")
+    fails = 0
     while True:
         try:
             state = check_once(my_login, _load_state())
             _save_state(state)
+            fails = 0
         except Exception as e:
+            fails += 1
+            _log(f"tick error #{fails}: {type(e).__name__}: {e}")
             print(f"[railway_watch] tick error: {e}", file=sys.stderr)
+            if fails >= 20:
+                _log("20 consecutive failures — backing off 10 min")
+                time.sleep(600)
+                fails = 0
         if once:
             return
         time.sleep(POLL_SECONDS)

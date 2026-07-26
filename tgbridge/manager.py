@@ -441,8 +441,31 @@ class AgentManager:
             for old in sorted(BACKUP_DIR.glob("state-*.zip"))[:-14]:
                 old.unlink()
             log.info("state backed up to %s", name.name)
+            self._backup_offsite(name)
         except Exception:
             log.exception("state backup failed")
+
+    def _backup_offsite(self, zip_path) -> None:
+        """Mirror the backup off this disk (a same-disk backup doesn't survive the
+        failure it exists for). Target: BRIDGE_BACKUP_DIR, else OneDrive if present."""
+        try:
+            import os
+            import shutil as _sh
+            from pathlib import Path
+            dest = os.environ.get("BRIDGE_BACKUP_DIR", "").strip()
+            root = Path(dest) if dest else Path.home() / "OneDrive" / "AlfredBackup"
+            if not dest and not root.parent.exists():
+                return  # no OneDrive on this machine and nothing configured
+            root.mkdir(parents=True, exist_ok=True)
+            _sh.copy2(zip_path, root / zip_path.name)
+            for old in sorted(root.glob("state-*.zip"))[:-14]:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+            log.info("offsite backup -> %s", root / zip_path.name)
+        except Exception:
+            log.exception("offsite backup failed")
 
     async def _health_loop(self):
         h, m = (int(x) for x in HEALTH_TIME.split(":"))
