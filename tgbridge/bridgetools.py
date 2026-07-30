@@ -7,17 +7,24 @@ to Claude. One server instance is built per session so handlers close over it.
 
 import asyncio
 import logging
+import os
+from pathlib import Path
 from typing import Annotated
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from . import napkin_store
+from .config import WORKDIR
 
 log = logging.getLogger("bridge.tools")
 
 # x-reader's Node CLI tools (content fetcher + Gemma model router) shelled out by
-# the fetch_content / route_model tools below.
-XREADER_DIR = r"D:\Projects\x-reader"
+# the fetch_content / route_model tools below. Derived from WORKDIR (which is
+# already OS-aware: D:\Projects on Windows, ~/projects or $BRIDGE_WORKDIR on
+# POSIX) rather than hardcoded, so the same checkout works on both. Was a
+# literal D:\Projects\x-reader, which made every fetch_content/route_model call
+# fail with a cwd-not-found OSError on macOS.
+XREADER_DIR = os.environ.get("BRIDGE_XREADER_DIR", str(Path(WORKDIR) / "x-reader"))
 
 SERVER_NAME = "bridge"
 TOOL_NAMES = ["send_file", "send_buttons", "message_agent",

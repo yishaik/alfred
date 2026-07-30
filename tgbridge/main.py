@@ -78,7 +78,10 @@ BOT_COMMANDS = [
 
 async def post_init(app):
     import time as _t
-    app._bridge_started_at = _t.monotonic()   # read by /version
+    # bot_data, not an attribute: telegram.ext.Application defines __slots__
+    # and has no __dict__, so `app._bridge_started_at = ...` raises
+    # AttributeError on python-telegram-bot >= 22.4. Read by /version.
+    app.bot_data["bridge_started_at"] = _t.monotonic()
     removed = sweep_tmp()
     if removed:
         log.info("startup tmp sweep removed %d stale entries", removed)

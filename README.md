@@ -137,6 +137,30 @@ start_bridge.vbs            # background, logs to bridge.log, auto-restarts
 python selftest.py          # offline sanity check
 ```
 
+### macOS setup
+```bash
+uv venv --python 3.13 --python-preference only-managed .venv
+uv pip install --python .venv/bin/python -r requirements.txt
+npm i -g napkin-ai          # memory backend; without it /memory silently no-ops
+cp .env.example .env        # then fill BRIDGE_BOT_TOKEN + BRIDGE_CHAT_ID
+.venv/bin/python selftest.py
+.venv/bin/python bridge.py  # foreground
+```
+Autostart (the launchd counterpart to `install_autostart.bat`):
+```bash
+./install_autostart.sh              # install + start at login
+./install_autostart.sh --uninstall  # stop + remove
+launchctl print gui/$(id -u)/com.yishaik.alfred   # status
+```
+The script generates the LaunchAgent with paths detected from your current
+shell, so asdf/nvm/homebrew installs keep working. **launchd hands a job a bare
+`PATH` and never reads `.zshrc`** — anything the bridge shells out to (`claude`,
+`node`/`npm`, `git`) must be baked into the plist, which the script does. A
+LaunchAgent starts at *login*, not at boot; enable automatic login if you want
+it back after an unattended reboot. It supervises `supervisor.py`, and because
+that traps SIGTERM and exits 0, `KeepAlive` is `{SuccessfulExit: false}` so
+`launchctl bootout` actually stops it instead of triggering a respawn.
+
 ### Python: use a real interpreter, not the Microsoft Store one
 The bridge runs on a dedicated **uv venv** (`.venv\`) built from a managed,
 standalone CPython — *not* the Microsoft Store Python. The Store Python lives in

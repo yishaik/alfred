@@ -30,9 +30,10 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import date
+from pathlib import Path
 
 from . import config
-from .config import STATE_DIR, load_json, save_json
+from .config import STATE_DIR, WORKDIR, load_json, save_json
 
 log = logging.getLogger("bridge.router")
 
@@ -217,7 +218,16 @@ _ACTION_EN = re.compile(
 _ACTION_HE = ("תבנה", "תתקן", "תריץ", "תבדוק", "תדחוף", "תפרוס", "תתקין",
               "צור", "תוסיף", "תשנה", "קומיט", "תמחק", "תכתוב", "תריצי",
               "תעשה", "הרץ", "בנה")
-_DRIVE_PATH = re.compile(r"[a-zA-Z]:[\\/]")     # C:\ , D:/ …
+_DRIVE_PATH = re.compile(
+    # Windows drive path: C:\ , D:/ …
+    r"[a-zA-Z]:[\\/]"
+    # …or a POSIX path with at least two segments: /Users/vagrant, ~/git/alfred.
+    # Anchored at a word boundary and requiring two segments so a bare slash
+    # ("either/or", "24/7") and a URL authority ("https://x.com" — the // and
+    # the preceding ':' don't match a leading space/start) don't trip it.
+    # Without this branch every Mac-side path mention was invisible to the
+    # router and got answered by a free model instead of the real agent.
+    r"|(?:^|[\s(\"'])~?/[\w.-]+/[\w.-]+", re.M)
 _SUMMARIZE_VERB = re.compile(
     r"\b(summari[sz]e|tl;?dr|תסכם|סכם|תמצת|קצר)\b", re.I)
 
@@ -592,10 +602,15 @@ async def answer_free(text: str, session, decision: Decision) -> tuple[str, str]
 # --------------------------------------------------------------------------- #
 # The rewrite is grounded in these wiki pages (read live if present). If they
 # are missing/unreadable we fall back to the embedded distilled rubric below.
+_REFINE_WIKI_DIR = Path(os.environ.get(
+    "BRIDGE_SECOND_BRAIN_DIR", str(Path(WORKDIR) / "second-brain"))) / "wiki"
+# Derived from WORKDIR (OS-aware) instead of a literal D:\Projects — on macOS
+# the hardcoded paths never resolved, so refinement silently ran on the
+# embedded fallback rubric forever instead of the live wiki.
 _REFINE_WIKI = [
-    r"D:\Projects\second-brain\wiki\Loop Engineering.md",
-    r"D:\Projects\second-brain\wiki\Agentic Engineering Concepts.md",
-    r"D:\Projects\second-brain\wiki\AI Agents.md",
+    str(_REFINE_WIKI_DIR / "Loop Engineering.md"),
+    str(_REFINE_WIKI_DIR / "Agentic Engineering Concepts.md"),
+    str(_REFINE_WIKI_DIR / "AI Agents.md"),
 ]
 
 # Faithful distillation of the three wiki pages — used verbatim when the files

@@ -17,3 +17,6 @@ __pycache__/
 collapse.log
 .env.*
 *.bak-*
+
+# ...but the committed template must be tracked
+!.env.example

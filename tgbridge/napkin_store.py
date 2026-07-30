@@ -46,8 +46,23 @@ def _base_cmd() -> list[str] | None:
     appdata = os.environ.get("APPDATA")
     if appdata:
         candidates.append(Path(appdata) / "npm" / "node_modules")
-    candidates += [Path("/usr/local/lib") / "node_modules",
+    candidates += [Path("/usr/local/lib") / "node_modules",     # intel homebrew
+                   Path("/opt/homebrew/lib") / "node_modules",  # arm homebrew
                    Path("/usr/lib") / "node_modules"]
+    # Version-manager roots (asdf/nvm/volta/fnm) live under $HOME and match none
+    # of the fixed prefixes above, so ask npm itself. This is the only branch
+    # that works on a Mac using asdf — without it we fell through to
+    # which("napkin") and silently disabled memory under a minimal PATH.
+    npm = shutil.which("npm")
+    if npm:
+        try:
+            out = subprocess.run([npm, "root", "-g"], capture_output=True,
+                                 text=True, timeout=15)
+            root = out.stdout.strip()
+            if out.returncode == 0 and root:
+                candidates.insert(0, Path(root))
+        except (OSError, subprocess.SubprocessError):
+            pass                # npm present but unusable — fall through
     for nm in candidates:
         mj = nm / "napkin-ai" / "dist" / "main.js"
         if mj.exists():

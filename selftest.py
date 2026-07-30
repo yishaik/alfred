@@ -122,6 +122,23 @@ def test_guards():
         "Bash", {"command": "curl -o out.json https://api.x.io/v1"}) is None)
     check("guard schtasks query ok", is_dangerous(
         "PowerShell", {"command": "schtasks /query /fo list"}) is None)
+    # macOS equivalents of the Windows persistence / security-disabling entries
+    check("guard launchctl load", is_dangerous(
+        "Bash", {"command": "launchctl load ~/Library/LaunchAgents/evil.plist"}) is not None)
+    check("guard csrutil disable", is_dangerous(
+        "Bash", {"command": "csrutil disable"}) is not None)
+    check("guard spctl master-disable", is_dangerous(
+        "Bash", {"command": "spctl --master-disable"}) is not None)
+    check("guard dd to raw disk", is_dangerous(
+        "Bash", {"command": "dd if=x.img of=/dev/disk2 bs=1m"}) is not None)
+    check("guard diskutil eraseDisk", is_dangerous(
+        "Bash", {"command": "diskutil eraseDisk JHFS+ blank disk2"}) is not None)
+    check("guard sudo rm", is_dangerous(
+        "Bash", {"command": "sudo rm /etc/hosts"}) is not None)
+    check("guard launchctl list ok", is_dangerous(
+        "Bash", {"command": "launchctl list | grep alfred"}) is None)
+    check("guard diskutil list ok", is_dangerous(
+        "Bash", {"command": "diskutil list"}) is None)
 
 
 def test_danger_pattern_validation():
@@ -444,6 +461,17 @@ def test_workdir_safety():
     check("blocks empty", is_dangerous_workdir(""))
     check("allows a real project dir",
           not is_dangerous_workdir("D:\\Projects\\app"))
+    # POSIX parity — the same intent on macOS/Linux
+    check("blocks posix root", is_dangerous_workdir("/"))
+    check("blocks /System", is_dangerous_workdir("/System/Library"))
+    check("blocks /etc", is_dangerous_workdir("/etc"))
+    check("blocks /usr", is_dangerous_workdir("/usr/local/lib"))
+    check("blocks /private", is_dangerous_workdir("/private/var"))
+    check("allows a home project dir",
+          not is_dangerous_workdir("/Users/me/projects/app"))
+    check("allows /Users despite /usr rule",
+          not is_dangerous_workdir("/Users/me"))
+    check("allows /tmp scratch", not is_dangerous_workdir("/tmp/work"))
 
 
 def test_background_worker():

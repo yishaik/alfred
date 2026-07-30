@@ -56,10 +56,19 @@ def sweep_tmp(max_age_hours: float = 72.0) -> int:
 
 
 def system_drive_free_gb() -> float | None:
+    """Free space on the OS volume, in GB. None if it can't be determined.
+
+    Windows uses %SystemDrive% (C:\\); POSIX uses /. Without the POSIX branch
+    this probed a literal "C:\\" on macOS/Linux, raised OSError and always
+    returned None — silently disabling the low-disk startup warning.
+    """
     import shutil as _sh
     try:
-        drive = os.environ.get("SystemDrive", "C:") + "\\"
-        return _sh.disk_usage(drive).free / 2**30
+        if os.name == "nt":
+            target = os.environ.get("SystemDrive", "C:") + "\\"
+        else:
+            target = "/"
+        return _sh.disk_usage(target).free / 2**30
     except OSError:
         return None
 
@@ -113,7 +122,8 @@ def _try_keyring(name: str) -> str:
 BOT_TOKEN = os.environ.get("BRIDGE_BOT_TOKEN", "") or _try_keyring("bot_token")
 CHAT_ID = int(os.environ.get("BRIDGE_CHAT_ID", "0"))          # owner private chat
 GROUP_ID = int(os.environ.get("BRIDGE_GROUP_ID", "0"))        # optional forum supergroup (threaded mode)
-WORKDIR = os.environ.get("BRIDGE_WORKDIR", r"D:\Projects")
+_DEFAULT_WORKDIR = r"D:\Projects" if os.name == "nt" else str(Path.home() / "projects")
+WORKDIR = os.environ.get("BRIDGE_WORKDIR", _DEFAULT_WORKDIR)
 MODEL = os.environ.get("BRIDGE_MODEL", "")                    # "" = Claude default
 CLAUDE_BIN = os.environ.get("BRIDGE_CLAUDE_BIN", "")          # "" = let the SDK find it
 
@@ -252,9 +262,16 @@ def authorized_chat(chat_id: int) -> bool:
 import re as _re
 
 _DANGEROUS_WORKDIRS = [
+    # Windows
     _re.compile(r"^[a-z]:[\\/]?$", _re.I),            # a bare drive root (C:\)
     _re.compile(r"^[a-z]:[\\/]windows", _re.I),        # the Windows dir
     _re.compile(r"^[a-z]:[\\/]program files", _re.I),  # Program Files
+    # POSIX (macOS/Linux) — same intent: filesystem root and system trees.
+    # Trailing (?:/|$) so /usr matches but /Users does not.
+    _re.compile(r"^/$"),                               # filesystem root
+    _re.compile(r"^/(System|Library|Applications|bin|sbin|usr|etc|var|dev|proc|boot)(?:/|$)"),
+    _re.compile(r"^/private(?:/|$)"),                  # macOS /private/etc, /private/var
+    _re.compile(r"^/Volumes/?$"),                      # the mount root itself
 ]
 
 

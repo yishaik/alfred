@@ -306,7 +306,7 @@ async def cmd_version(update: Update, ctx):
     commit = _git("rev-parse", "--short", "HEAD") or "?"
     subject = _git("log", "-1", "--format=%s")[:60]
     dirty = [l for l in _git("status", "--porcelain").splitlines() if l.strip()]
-    started = getattr(ctx.application, "_bridge_started_at", None)
+    started = ctx.application.bot_data.get("bridge_started_at")
     up = fmt_duration(_t.monotonic() - started) if started else "?"
     lines = [
         f"🏷 commit <code>{commit}</code> — {subject}",

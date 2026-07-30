@@ -43,6 +43,20 @@ DANGER_PATTERNS: list[re.Pattern] = [re.compile(p, re.IGNORECASE) for p in [
     r"\bschtasks\b[^\n]*/create",                              # persistence
     r"\bnetsh\s+(advfirewall|firewall)\b",
     r"\bgit\s+push\b.*--mirror\b",
+    # --- macOS/Linux equivalents of the Windows entries above ---
+    # persistence (the launchd/cron analogue of `schtasks /create`)
+    r"\blaunchctl\s+(load|bootstrap|enable)\b",
+    r"\bcrontab\s+[^\n]*-r?\s*[a-z/]",                         # crontab install/remove
+    # disabling OS security (the analogue of `netsh firewall`)
+    r"\bcsrutil\s+disable\b",                                  # System Integrity Protection
+    r"\bspctl\s+--master-disable\b",                           # Gatekeeper
+    r"\bsocketfilterfw\b[^\n]*--setglobalstate\s+off",         # macOS firewall
+    r"\bdefaults\s+write\b[^\n]*com\.apple\.(loginwindow|security)",
+    # privilege escalation / account creation
+    r"\bdscl\s+\.\s+-(create|delete)\b",                       # local account changes
+    r"\bsudo\s+(rm|dd|mkfs|chown|chmod)\b",
+    r"\bdd\b[^\n]*\bof=/dev/(disk|sd|nvme)",                   # raw device write
+    r"\bdiskutil\s+(eraseDisk|eraseVolume|reformat)\b",
 ] + EXTRA_DANGER_PATTERNS]
 
 
