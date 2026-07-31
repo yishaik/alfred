@@ -84,8 +84,20 @@ def build_bridge_server(session):
         if not labels:
             return _text("no labels given", err=True)
         markup = session._kb_markup(labels)
-        session.outbox.keyboard(str(args.get("text") or "➡️"), markup)
-        return _text("buttons shown; the tapped label arrives as the next user message")
+        # Always render the options as a numbered list in the text too, not just
+        # as inline-keyboard buttons. Some clients / group-topic setups don't
+        # show a bot's inline keyboard at all, and AskUserQuestion (harness-side)
+        # doesn't render here either — in both cases the user was left with a
+        # prompt and no way to answer. The list means they can reply with the
+        # number or the label even when no buttons appear; the number lands in
+        # the agent's context right under the options it just offered.
+        head = str(args.get("text") or "").strip()
+        lines = [f"{i + 1}. {lab}" for i, lab in enumerate(labels)]
+        body = (head + "\n\n" if head else "") + "\n".join(lines) + \
+            "\n\n(tap a button, or reply with the number)"
+        session.outbox.keyboard(body, markup)
+        return _text("buttons shown (with a numbered text fallback); the tapped "
+                     "label or a number reply arrives as the next user message")
 
     @tool("message_agent", "Send a message to another agent on this bridge "
           "(or a configured peer bridge). Rate-limited and hop-capped to "
