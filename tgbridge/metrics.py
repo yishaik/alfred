@@ -1,5 +1,13 @@
 """In-process event counters surfaced in /status and the daily health report.
 
+Purpose:  In-process counters — "what went wrong since the last restart" for /status.
+Inputs:   bump(name) calls from anywhere in the bridge.
+Outputs:  A counter mapping for /status and the daily health report.
+Key fns:  bump, summary.
+Deps:     none.
+Note:     Resets on restart by design — logs and audit.jsonl hold the history.
+Updated:  2026-07-31
+
 Counters reset when the bridge restarts — they answer "what went wrong since
 the last restart", not "ever"; the logs and audit trail hold history.
 """

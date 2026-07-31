@@ -1,5 +1,13 @@
 """A tiny Kanban to-do list — the first Alfred mini-app (#20).
 
+Purpose:  A tiny three-column Kanban board (todo → doing → done) for the user.
+Inputs:   /todo text from handlers; dicts restored from state/todos.json.
+Outputs:  Todo/TodoList objects and a phone-friendly rendered board.
+Key fns:  TodoList.add/set_status/remove/clear_done/render.
+Deps:     none (pure dataclasses) — the manager persists it.
+Note:     Pure logic, unit-tested; the first Alfred mini-app.
+Updated:  2026-07-31
+
 One list for the user (the bridge is single-user), persisted across sessions.
 Items move through three columns — todo -> doing -> done — and render as a
 compact phone-friendly board. The logic here is pure and unit-tested; the

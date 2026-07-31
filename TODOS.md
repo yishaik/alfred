@@ -9,17 +9,13 @@ Consolidated from PLAN-*.md files. Agent: work top-to-bottom; one task at a time
 
 ## 🔴 High priority
 
-- [ ] **Pre-commit hook** — add `.git/hooks/pre-commit` that runs `py_compile` on all changed .py files; fail on syntax error
-- [ ] **7-line summaries** — add greppable header block to each tgbridge/*.py module (name, purpose, inputs, outputs, key functions, dependencies, last-updated)
+*(nothing open — see Done 2026-07-31)*
 
 ---
 
 ## 🟡 Medium priority (from PLAN-stability-ux.md 2026-07-03)
 
-- [~] **A1. Serialize state writes** — add threading.Lock inside config.save_json to prevent race on Windows
-- [ ] **A2. Graceful shutdown** — wrap m.stop_all() in asyncio.wait_for(timeout=30) in main.py post_shutdown
-- [ ] **UX: queue position display** — show position + "🗑 Clear queue" button for queued messages
-- [ ] **Scheduler: topic-aware fire** — jobs created in a forum topic fire back into that topic
+*(nothing open — A1/A2 and both UX items are done; see Done 2026-07-31)*
 
 ---
 
@@ -65,3 +61,20 @@ Consolidated from PLAN-*.md files. Agent: work top-to-bottom; one task at a time
 - [x] Error counters in /status
 - [x] AGENTS.md router — 2026-07-12
 - [x] AGENT_WORKFLOW.md — 2026-07-12
+- [x] **Pre-commit hook** — tools/pre-commit (py_compile on the STAGED content of
+      changed .py files); install with tools/install-hooks.sh — 2026-07-31
+- [x] **7-line summaries** — every tgbridge/*.py carries the block; `grep '^Purpose:'
+      tgbridge/*.py` lists them — 2026-07-31
+- [x] **A1. Serialize state writes** — config._SAVE_LOCK; save_json is the single
+      writer for every state file — 2026-07-31 (verified)
+- [x] **A2. Graceful shutdown** — main.post_shutdown already wraps stop_all() in
+      asyncio.wait_for(30) — 2026-07-31 (verified, was stale in this list)
+- [x] **Stale resume self-heal** — a session id the CLI doesn't know (state restored
+      onto another machine) is dropped and restarted fresh instead of failing every
+      start with "exit code 1" — 2026-07-31
+- [x] **Surface the CLI's stderr** — start/restart/send failures now carry the claude
+      subprocess's last stderr lines into the log and the chat — 2026-07-31
+- [x] **Conflict give-up** — a getUpdates conflict lasting >10 min concedes the bot
+      token and exits rc=75; supervisor waits 15 min — 2026-07-31
+- [x] **Gentler restart ladder** — supervisor 5/5/15/30/60/300s, so a DNS blip no
+      longer costs 5 minutes offline — 2026-07-31

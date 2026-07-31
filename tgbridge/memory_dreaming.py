@@ -1,5 +1,13 @@
 """Periodic background synthesis for Alfred's long-term memory.
 
+Purpose:  Background synthesis — turns recent turns into safe add/remove memory edits.
+Inputs:   Rolling per-session conversation history + the current memory snapshot.
+Outputs:  A validated JSON plan, applied locally, plus one audit row per run.
+Key fns:  MemoryDreamer.start/stop/run_once, _normalize_plan, _apply_plan, _extract_json.
+Deps:     claude_agent_sdk (a tool-less process), config.
+Note:     Plans are validated before they are applied; secret-looking text is dropped.
+Updated:  2026-07-31
+
 The live assistant records a small rolling history on every session.  This
 module periodically compares unseen user/assistant turns with the agent's
 current memory, asks a tool-less Claude process for a constrained JSON plan,

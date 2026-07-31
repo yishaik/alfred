@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Syntax gate: a .py file that doesn't compile must never reach a commit — a
+# broken module takes the whole bridge down on the next supervisor restart, and
+# that has happened. Compiles the STAGED content (not the worktree copy), so a
+# half-finished edit you haven't staged can't fail the commit and a staged typo
+# can't sneak through behind a fixed worktree.
+#
+# Install: tools/install-hooks.sh (or: cp tools/pre-commit .git/hooks/ && chmod +x)
+# Bypass (emergencies only): git commit --no-verify
+set -u
+
+root="$(git rev-parse --show-toplevel)"
+py="$root/.venv/bin/python"
+[ -x "$py" ] || py="$(command -v python3 || command -v python)"
+[ -n "$py" ] || { echo "pre-commit: no python found — skipping syntax check"; exit 0; }
+
+# NUL-delimited: filenames with spaces are fine
+mapfile -t -d '' files < <(git diff --cached --name-only --diff-filter=ACM -z -- '*.py')
+[ ${#files[@]} -eq 0 ] && exit 0
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+failed=0
+for f in "${files[@]}"; do
+    staged="$tmp/$(echo "$f" | tr '/' '_')"
+    git show ":$f" > "$staged" 2>/dev/null || continue
+    if ! err="$("$py" -m py_compile "$staged" 2>&1)"; then
+        echo "pre-commit: syntax error in $f"
+        echo "$err" | sed "s#$staged#$f#g" | sed 's/^/    /'
+        failed=1
+    fi
+done
+
+if [ "$failed" -ne 0 ]; then
+    echo
+    echo "Commit aborted. Fix the syntax error (or --no-verify if you really mean it)."
+    exit 1
+fi
+exit 0

@@ -1,5 +1,13 @@
 """A lightweight contact book mini-app (#25).
 
+Purpose:  A structured people list — who someone is and how they relate to the user.
+Inputs:   /contact add|find|rm text from handlers; dicts restored from contacts.json.
+Outputs:  Contact/ContactBook objects, a rendered list, to_dict for persistence.
+Key fns:  ContactBook.add/remove/find/render, Contact.to_dict/from_dict.
+Deps:     none (pure dataclasses) — the manager persists it.
+Note:     Structured counterpart to memory.py's free-form pinned facts.
+Updated:  2026-07-31
+
 "/contact add Dana | plumber, fixed the boiler, 050-..." remembers a person and
 how they relate to you; "/contact find dana" looks them up. Complements the
 agent's own memory (pinned facts) with a structured, browsable people list.

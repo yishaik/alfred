@@ -1773,13 +1773,22 @@ async def _edit(q, text: str, markup=None):
 
 
 _last_err_note = 0.0
+_conflict_since = 0.0        # start of the current unbroken run of conflicts
+_conflict_last = 0.0         # most recent conflict, to detect the run ending
+exit_code = 0                # main.py exits with this after run_polling returns
+
+
+def _now() -> float:
+    """Monotonic clock, indirected so tests can drive the conflict window
+    without patching time.monotonic out from under the event loop."""
+    import time as _time
+    return _time.monotonic()
 
 
 async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE):
     """Transient Telegram hiccups (Bad Gateway, timeouts, flood waits) are
     retried by PTB's own loop — logging them is enough; never page the user.
     Real errors are forwarded at most once per 5 minutes."""
-    import time as _time
     from telegram.error import Conflict, NetworkError, RetryAfter, TimedOut
     err = ctx.error
     if isinstance(err, (NetworkError, TimedOut, RetryAfter)):
@@ -1787,22 +1796,47 @@ async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE):
         log.warning("transient telegram error: %s: %s", type(err).__name__, err)
         return
     global _last_err_note
-    now = _time.monotonic()
+    now = _now()
     if isinstance(err, Conflict):
         # another poller on this bot token — the singleton lock should prevent
         # it, but if it happens, log ONE concise line (no traceback storm) and
         # warn the user once per 5 min instead of every retry
+        global _conflict_since, _conflict_last, exit_code
+        from .config import (CHAT_ID, CONFLICT_EXIT_RC, CONFLICT_EXIT_SECS,
+                             CONFLICT_WINDOW_SECS)
         metrics.bump("tg_conflict")
-        log.warning("getUpdates Conflict — another instance is polling this bot")
+        if now - _conflict_last > CONFLICT_WINDOW_SECS:
+            _conflict_since = now         # previous run ended; this is a new one
+        _conflict_last = now
+        held = now - _conflict_since
+        log.warning("getUpdates Conflict — another instance is polling this bot "
+                    "(%.0fs)", held)
+        # both pollers keep stealing updates from each other, so a conflict that
+        # won't clear leaves this bridge deaf. Concede the token and exit; the
+        # supervisor waits CONFLICT_EXIT_RC out rather than respawning instantly.
+        if CONFLICT_EXIT_SECS and held >= CONFLICT_EXIT_SECS:
+            log.error("conflict unresolved for %.0fs — conceding the bot token "
+                      "and exiting (rc=%d)", held, CONFLICT_EXIT_RC)
+            exit_code = CONFLICT_EXIT_RC
+            try:
+                await ctx.bot.send_message(
+                    CHAT_ID, f"🛑 Another instance has been polling this bot for "
+                    f"{held / 60:.0f} min. Shutting this one down so you're left "
+                    f"with one working bridge — restart it once the duplicate is "
+                    f"stopped.")
+            except Exception as e:
+                log.debug("conflict exit notice send failed: %s", e)
+            ctx.application.stop_running()
+            return
         if now - _last_err_note < 300:
             return
         _last_err_note = now
         try:
-            from .config import CHAT_ID
             await ctx.bot.send_message(
-                CHAT_ID, "⚠️ Another bridge instance is polling this bot. Only "
-                "one should run — check for a duplicate start_bridge / leftover "
-                "python bridge.py. This instance keeps retrying meanwhile.")
+                CHAT_ID, f"⚠️ Another bridge instance is polling this bot "
+                f"({held / 60:.0f} min). Only one should run — check for a "
+                f"duplicate start_bridge / leftover python bridge.py. This "
+                f"instance keeps retrying meanwhile.")
         except Exception as e:
             log.debug("conflict notice send failed: %s", e)
         return

@@ -1,5 +1,13 @@
 """Text formatting: markdown -> Telegram HTML, splitting, tool summaries.
 
+Purpose:  Renders Claude's markdown into Telegram's HTML subset and splits long messages.
+Inputs:   Markdown text, tool-call payloads, tool results, durations.
+Outputs:  HTML sized for Telegram, tool summary lines, formatted errors.
+Key fns:  md_to_html, split_msg, summarize_tool, format_tool_lines, format_output.
+Deps:     config; no other bridge-internal deps.
+Note:     Outbox retries as plain text when Telegram rejects the HTML entities.
+Updated:  2026-07-31
+
 The renderer targets Telegram's HTML subset and aims for a "rich & decorative"
 look: language-tagged code blocks (Telegram colorizes them), markdown tables
 rendered as aligned monospace, expandable blockquotes for long quotes, spoilers

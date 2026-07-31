@@ -1,5 +1,13 @@
 """Rate limiting primitives — the guard rails against infinite loops.
 
+Purpose:  Guard rails against the three loop hazards: ping-pong, runaway jobs, crash storms.
+Inputs:   Event timestamps — allow() calls — and crash records.
+Outputs:  Allow/deny plus wait times; a restart delay and a drop-resume flag.
+Key fns:  TokenBucket.allow/seconds_until, PairLimiter.allow, Backoff.record/reset.
+Deps:     none (pure).
+Note:     Backoff drops the session id after repeated fast crashes so a bad resume can't loop.
+Updated:  2026-07-31
+
 Three loop hazards exist in this bridge and each has a dedicated guard:
   * bot<->bot ping-pong        -> hop counters + per-pair TokenBucket
   * runaway scheduler/agents   -> per-agent non-human turn budget

@@ -1,6 +1,14 @@
 """Thin wrapper over the `napkin` CLI (napkin-ai) — a local-first, file-based
 knowledge vault with BM25 search and progressive disclosure.
 
+Purpose:  Thin wrapper over the napkin CLI — the per-agent local markdown vault.
+Inputs:   A vault dir (state/kb/<agent>/), note paths, search queries.
+Outputs:  Parsed CLI JSON: overview, search hits, note bodies; NapkinError on failure.
+Key fns:  available, ensure_vault, overview, search, read, create, append, delete.
+Deps:     node + the napkin-ai package; no bridge-internal deps.
+Note:     Invokes the package's JS entry point through node directly, not a shell shim.
+Updated:  2026-07-31
+
 Each agent gets its own vault directory (state/kb/<agent>/). The vault is just
 plain markdown on disk; a `.napkin/` metadata folder (like `.git`) holds the
 search index. We drive the CLI's `--json` mode by invoking the package's JS

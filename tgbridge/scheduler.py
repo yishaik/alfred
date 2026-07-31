@@ -1,5 +1,13 @@
 """Persistent job scheduler — the engine behind secretary mode.
 
+Purpose:  Persistent jobs — reminders and scheduled prompts; the engine behind secretary mode.
+Inputs:   ⟦REMIND⟧/⟦SCHEDULE⟧ markers, /remind, and the webhook inbox directory.
+Outputs:  Timed Telegram messages or agent turns; jobs persisted to state/jobs.json.
+Key fns:  Scheduler.start/stop/add/cancel/list_jobs, _loop, _fire.
+Deps:     markers (time parsing), session (firing turns), config (caps).
+Note:     MAX_JOBS, MIN_RECUR_MINUTES and the non-human turn budget cap runaway scheduling.
+Updated:  2026-07-31
+
 Jobs come from Claude's ⟦REMIND⟧/⟦SCHEDULE⟧ markers or the user's /remind.
 Caps: at most MAX_JOBS jobs, recurrence floor MIN_RECUR_MINUTES, and every
 'prompt' firing draws from the target session's non-human turn budget — a

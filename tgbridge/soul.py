@@ -1,5 +1,13 @@
 """The 'soul' of an agent — a structured character sheet.
 
+Purpose:  A structured character sheet — name, avatar, role, tone, values, quirks.
+Inputs:   /soul edits from handlers; a dict restored from the agent config.
+Outputs:  render_prompt() for the system prompt; render_card() for the user.
+Key fns:  Soul.is_set/render_prompt/render_card/to_dict/from_dict.
+Deps:     none (pure dataclass).
+Note:     Replaced the old free-text persona; mood.py layers on top per-turn.
+Updated:  2026-07-31
+
 Replaces the old free-text `persona` string with a structured identity:
 a display name, an avatar emoji, a role, a tone, guiding values, and speech
 quirks. It renders two ways:

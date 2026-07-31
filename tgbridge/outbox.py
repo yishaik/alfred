@@ -1,5 +1,13 @@
 """Per-route Telegram delivery: one queue, one sender task.
 
+Purpose:  One queue and one sender task per route, so everything reaches Telegram in order.
+Inputs:   emit/file/voice/keyboard/stream_delta calls from a session.
+Outputs:  Telegram sends: batched text, one edited streaming draft, files, keyboards.
+Key fns:  Outbox.start/stop/emit/file/keyboard/stream_delta/stream_close/ensure_alive.
+Deps:     config (send intervals), fmt (HTML), telegram.
+Note:     Throttled per chat; HTML Telegram rejects is resent as plain text.
+Updated:  2026-07-31
+
 Everything a session wants to show the user flows through here so ordering is
 preserved: batched text lines, streaming drafts (one message edited in place),
 files, question/permission keyboards. Sends are throttled per chat and HTML

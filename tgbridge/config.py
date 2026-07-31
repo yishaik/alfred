@@ -1,5 +1,13 @@
 """Config & persistent state for the bridge.
 
+Purpose:  Loads secrets/settings from env/.env/keyring; owns every state-file read+write.
+Inputs:   Environment, the .env beside bridge.py, keyring, state/*.json on disk.
+Outputs:  Module-level constants (token, chat ids, paths, caps) + load_json/save_json.
+Key fns:  load_json, save_json, authorized_chat, is_dangerous_workdir, sweep_tmp.
+Deps:     keyring (optional). No bridge-internal deps — everything else imports this.
+Note:     _SAVE_LOCK serializes state writes; save_json is the single writer.
+Updated:  2026-07-31
+
 Secrets come from the environment or the .env file next to bridge.py
 (never hardcoded: the bot token gates prompt injection into an elevated
 Claude, i.e. it is as sensitive as a shell on this machine).
@@ -143,6 +151,15 @@ PEER_BIND = os.environ.get("BRIDGE_PEER_BIND", "127.0.0.1")
 # second copy (a double-launched .vbs/supervisor) can't poll the same bot
 # token and trigger Telegram "Conflict: terminated by other getUpdates".
 LOCK_PORT = int(os.environ.get("BRIDGE_LOCK_PORT", "49517"))
+# The loopback lock only catches a duplicate on THIS machine. A copy running
+# elsewhere (another laptop, a cloud deploy) still steals getUpdates, and the
+# two pollers then trade updates forever — this instance stays up but receives
+# almost nothing. After this many seconds of unbroken conflict, give the token
+# to the other instance and exit with CONFLICT_EXIT_RC so the supervisor waits
+# it out instead of respawning a bridge that can't hear anything. 0 = never.
+CONFLICT_EXIT_SECS = int(os.environ.get("BRIDGE_CONFLICT_EXIT_SECS", "600"))
+CONFLICT_EXIT_RC = 75            # EX_TEMPFAIL; supervisor.py maps it to a long wait
+CONFLICT_WINDOW_SECS = 120       # no conflict for this long = the fight is over
 PEER_NAME = os.environ.get("BRIDGE_PEER_NAME", "bridge")      # how this bridge introduces itself
 # "alice=http://host:9001;bob=http://host2:9002"
 PEERS: dict[str, str] = {}

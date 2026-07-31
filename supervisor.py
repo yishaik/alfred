@@ -4,7 +4,11 @@
 start_bridge.bat delegates here because batch can't do time math and
 PowerShell may be unavailable (it broke when C: filled up once). A bridge
 that exits within FAST_EXIT_SECS gets an escalating restart delay
-(5s -> 60s -> 300s); a healthy long run resets the ladder. All bridge output
+(5s -> 300s over six rungs); a healthy long run resets the ladder. The early
+rungs are deliberately short: the common fast exit is a transient network
+failure (DNS, flaky uplink) that clears in seconds, and the old 5/60/300 ladder
+put Alfred offline for five minutes on the second one. Only a real crash loop
+— five consecutive fast exits — reaches the slow rungs. All bridge output
 goes to bridge.log, rotated at ~10MB. No third-party imports — this must run
 even when the venv is broken.
 """
@@ -18,8 +22,13 @@ import time
 ROOT = os.path.dirname(os.path.abspath(__file__))
 LOG = os.path.join(ROOT, "bridge.log")
 FAST_EXIT_SECS = 30
-DELAYS = [5, 60, 300]
+DELAYS = [5, 5, 15, 30, 60, 300]
 MAX_LOG_BYTES = 10 * 1024 * 1024
+# the bridge exits with this when another instance holds the bot token (see
+# config.CONFLICT_EXIT_RC). Restarting fast would just resume the tug-of-war,
+# so wait long enough for a human to stop the duplicate.
+CONFLICT_RC = 75
+CONFLICT_DELAY = 900
 
 
 def _rotate():
@@ -70,9 +79,13 @@ def main():
             uptime = time.monotonic() - start
             fast_exits = fast_exits + 1 if uptime < FAST_EXIT_SECS else 0
             delay = DELAYS[min(fast_exits, len(DELAYS) - 1)]
+            why = f" (fast-exit #{fast_exits})" if fast_exits else ""
+            if rc == CONFLICT_RC:
+                fast_exits = 0        # not a crash loop — don't poison the ladder
+                delay = CONFLICT_DELAY
+                why = " (another instance holds the bot token)"
             _note(fh, f"bridge exited rc={rc} after {uptime:.0f}s — "
-                      f"restarting in {delay}s"
-                      + (f" (fast-exit #{fast_exits})" if fast_exits else ""))
+                      f"restarting in {delay}s{why}")
         time.sleep(delay)
 
 

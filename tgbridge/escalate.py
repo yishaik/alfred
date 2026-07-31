@@ -1,5 +1,13 @@
 """Auto-escalation — catch a brewing problem before it breaks things (#8).
 
+Purpose:  Watches vital signs between health reports and pings before something breaks.
+Inputs:   Disk free, per-session queue depth, recent crash count — passed in by the manager.
+Outputs:  A list of alert strings; empty when nothing crossed a line.
+Key fns:  assess.
+Deps:     none (pure) — the manager owns the timer and the edge-trigger state.
+Note:     Edge-triggered: each alert fires once, then stays quiet until it clears.
+Updated:  2026-07-31
+
 The daily health report is a once-a-day snapshot; this watches the same vital
 signs every few minutes and pings the moment one crosses a line — low disk, a
 session whose queue is backing up (likely stuck), or a run of crashes. Each

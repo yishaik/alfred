@@ -1,5 +1,13 @@
 """Voice in/out.
 
+Purpose:  Voice in (transcription) and voice out (text to speech).
+Inputs:   Telegram voice/audio files; reply text to speak; API keys from config.
+Outputs:  Transcribed text; an opus voice note (OpenAI) or mp3 (edge-tts).
+Key fns:  available, transcribe, tts_available, synthesize, list_voices, active_backend.
+Deps:     httpx, the optional edge_tts package, config.
+Note:     Backend is whichever key/package is present — the first one found wins.
+Updated:  2026-07-31
+
 In:  transcription via OpenAI Whisper (OPENAI_API_KEY) or Groq (GROQ_API_KEY).
 Out: TTS via OpenAI (opus → real Telegram voice note) or the free edge-tts
      package (mp3 → audio message) when installed.

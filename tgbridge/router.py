@@ -1,5 +1,13 @@
 """Pre-prompt model router + free-model backends.
 
+Purpose:  Decides per prompt whether a free model answers or the Claude session does.
+Inputs:   The user's text, recent history, router config, daily usage counters.
+Outputs:  A Decision, a free-model answer, optional prompt refinement, decision logs.
+Key fns:  classify, answer_free, refine, should_refine, usage_today, recent_decisions.
+Deps:     httpx (Ollama / free cloud tiers), config; state files under state/.
+Note:     Fail-safe by design — any router error falls through to the Claude session.
+Updated:  2026-07-31
+
 Before every USER prompt the router decides who should answer:
 
   * FREE path — trivial, self-contained text asks (quick Q&A, translation,

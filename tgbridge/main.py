@@ -297,3 +297,8 @@ def main():
 
     print(f"[bridge] starting — chat={CHAT_ID} group={GROUP_ID or '-'}")
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    # run_polling returns on a clean shutdown. handlers.exit_code is non-zero
+    # only when a handler asked to stay down for a while (sustained getUpdates
+    # conflict) — the supervisor reads the code and picks its restart delay.
+    if handlers.exit_code:
+        raise SystemExit(handlers.exit_code)

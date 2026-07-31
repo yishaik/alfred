@@ -1,5 +1,13 @@
 """A pocket expense tracker mini-app (#24).
 
+Purpose:  A pocket expense ledger — log a spend, show the month by #category.
+Inputs:   /expense text from handlers; dicts restored from expenses.json.
+Outputs:  Expense/Ledger objects, month totals, a rendered breakdown.
+Key fns:  parse_amount_note, Ledger.add/remove/total/by_category/render.
+Deps:     none (pure dataclasses) — the manager persists it.
+Note:     Categories are #hashtags inside the note; the parsing is unit-tested.
+Updated:  2026-07-31
+
 "/expense add 200 #food groceries" logs a spend; "/expense" shows the month's
 total broken down by #category. One ledger for the user, persisted. Pure logic
 (parse, total, breakdown, render) is unit-tested; the manager persists it.

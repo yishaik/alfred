@@ -1,5 +1,13 @@
 """Passive watchers — react to changes in the world without being asked (#6).
 
+Purpose:  Passive watchers — poll a file, folder or git repo and speak up when it changes.
+Inputs:   Watch targets from /watch and the previous state signature of each.
+Outputs:  A change description fed to the agent through the proactive channel.
+Key fns:  detect_kind, compute_state, dir_signature, watch_prompt, Watcher.to_dict.
+Deps:     proactive (quiet hours), git via subprocess; the manager owns the poll loop.
+Note:     The event-driven sibling of the idle check-in — same speak-only-if-it-matters rule.
+Updated:  2026-07-31
+
 Point Alfred at a file, a folder, or a git repo and it polls them in the
 background; when one changes, it feeds the agent a turn describing the change
 through the proactive channel (#5), so the agent decides whether the change is

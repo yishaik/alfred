@@ -1,5 +1,13 @@
 """Bot-to-bot transport across processes/machines.
 
+Purpose:  Bot-to-bot transport across processes — Telegram bots cannot message each other.
+Inputs:   POST /msg carrying the shared token, or send() naming a configured peer.
+Outputs:  HTTP deliveries to peers; inbound messages fed to the named local agent.
+Key fns:  PeerBus.start/stop/send/known/diagnostics.
+Deps:     httpx, config (BRIDGE_PEER_* env).
+Note:     The hop count travels with the message so a relay loop cannot run away.
+Updated:  2026-07-31
+
 Telegram bots cannot message each other, so bridges talk over a tiny
 token-authenticated HTTP bus instead:
 

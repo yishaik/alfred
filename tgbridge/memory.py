@@ -1,5 +1,13 @@
 """Long-term memory for an agent — what it carries between sessions.
 
+Purpose:  An agent's durable memory — what it carries across sessions and crashes.
+Inputs:   /remember and /forget, dreaming plans, the per-agent vault under state/kb/.
+Outputs:  MemoryItem list, a system-prompt block, a human-readable list.
+Key fns:  Memory.add/remove/search/decay/items/render_prompt/render_list.
+Deps:     napkin_store (vault I/O), config.
+Note:     Pinned facts are markdown; the vault adds BM25 search over the notes.
+Updated:  2026-07-31
+
 A session is ephemeral; the conversation scrolls away and a /clear or a crash
 wipes the working context. Memory is the durable layer underneath, injected
 back into every fresh session so the agent recalls things without anyone

@@ -1,6 +1,14 @@
 """A lightweight mood for an agent — transient emotional weather on top of the
 stable character sheet (soul.py).
 
+Purpose:  Transient emotional weather layered on top of the stable character sheet.
+Inputs:   Turn outcomes (ok/error/duration) and restart notices from the session.
+Outputs:  A one-line tone nudge, injected per-turn only when the weather shifts.
+Key fns:  Mood.note_result/note_restart/state/label/describe/pop_nudge.
+Deps:     none — no I/O, no persistence.
+Note:     soul.py is who the agent IS; this is how it feels right now.
+Updated:  2026-07-31
+
 The soul is *who the agent is* and lives in the system prompt. The mood is *how
 the agent feels right now* and is injected per-turn, only when it changes, so a
 long or rocky session subtly shifts the tone without ever spamming the chat.

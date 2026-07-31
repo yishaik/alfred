@@ -1,5 +1,13 @@
 """AgentManager: the registry of agents, live sessions, and message routing.
 
+Purpose:  Registry of agents and live sessions; routes each chat/topic to the right one.
+Inputs:   A route (chat_id, thread_id), agent configs, and the state files under state/.
+Outputs:  AgentSession objects, persisted agent/memory/todo/expense state, backups.
+Key fns:  session_for_route, session_for_agent, save_agents, add_cost, decay_memories.
+Deps:     session, memory, todos, expenses, contacts, watchers, digest, dream, escalate.
+Note:     Bot-to-bot hop caps and per-pair rate limits are enforced here.
+Updated:  2026-07-31
+
 Routing model
   * private chat            -> the "active" agent (switch via /agents)
   * forum topic (threaded)  -> its own session; bind an agent with /bind
@@ -241,9 +249,19 @@ class AgentManager:
         try:
             await s.start(resume=True)
         except Exception as e:
+            # the SDK's ProcessError says only "check stderr" — carry the
+            # subprocess's own last words into both the log and the chat, or a
+            # start failure is undiagnosable after the fact
+            gist = s.stderr_gist()
             s.outbox.start()
-            s.outbox.emit(f"❌ couldn't start Claude for {agent_name}: {e}")
-            log.exception("start failed for %s", skey)
+            s.outbox.emit(f"❌ couldn't start Claude for {agent_name}: {e}"
+                          + (f"\n{gist}" if gist else ""))
+            log.error("start failed for %s: %s | stderr: %s", skey, e,
+                      gist or "(empty)")
+            log.debug("start failure traceback for %s", skey, exc_info=True)
+            # don't leave the session dead until the user happens to type again:
+            # a transient failure (DNS blip, cold CLI) heals on a backed-off retry
+            s.schedule_reconnect()
         return s
 
     async def session_for_route(self, chat_id: int,

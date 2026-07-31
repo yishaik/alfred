@@ -1,5 +1,13 @@
 """Hooks: PreToolUse guardrails + audit trail, PostToolUse diff previews.
 
+Purpose:  PreToolUse guardrails, the audit trail, and PostToolUse diff previews.
+Inputs:   SDK hook payloads for every tool call; danger patterns from config.
+Outputs:  Allow/deny decisions, state/audit.jsonl rows, compact diffs to the chat.
+Key fns:  build_hooks, is_dangerous, audit, rotate_audit, render_diff.
+Deps:     config, fmt, claude_agent_sdk; the session supplies the permission prompt.
+Note:     Hooks fire even under bypassPermissions — this layer still protects you.
+Updated:  2026-07-31
+
 Hooks fire for EVERY tool call regardless of permission mode, so this is the
 layer that still protects you when auto-approve is on: shell commands matching
 a danger pattern require a Telegram tap before they run. Everything is also

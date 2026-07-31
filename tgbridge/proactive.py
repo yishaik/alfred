@@ -1,5 +1,13 @@
 """Proactive commentary — letting an agent speak up without being prompted.
 
+Purpose:  The one opt-in way an agent speaks unprompted — the idle check-in.
+Inputs:   Time since the last user message, the quiet-hours window, the per-agent flag.
+Outputs:  Booleans the manager's loop acts on, plus a reason when it declines.
+Key fns:  is_quiet_hour, should_check_in, declined.
+Deps:     none (pure) — the manager owns the timer and feeds the turn.
+Note:     watchers.py is the event-driven sibling of this idle path.
+Updated:  2026-07-31
+
 The bridge is otherwise strictly reactive: the agent only runs when a turn is
 fed to it. This module adds the one safe, opt-in way for it to volunteer a
 thought — an *idle check-in*. When the user has been quiet for a while, a

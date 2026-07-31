@@ -1,5 +1,13 @@
 """Per-turn tool-call tracing (concept #19 from the agentic-engineering audit).
 
+Purpose:  Per-turn tool-call timeline — how each call went, not just that it ran.
+Inputs:   Tool start/finish events from the hooks, kept per session.
+Outputs:  Spans (duration + ok/error) rendered as the /trace timeline.
+Key fns:  start, finish, render.
+Deps:     config; guards emits the events.
+Note:     audit.jsonl records that a tool ran; this records how it went.
+Updated:  2026-07-31
+
 The audit log (guards.audit → audit.jsonl) records *that* a tool ran. Tracing
 adds *how it went*: wall-clock duration and ok/error outcome, kept per session so
 `/trace` can show the recent tool-call sequence as a readable timeline — the

@@ -1,5 +1,13 @@
 """Dream mode — an overnight pass that tidies up and prepares the morning (#9).
 
+Purpose:  Overnight pass: synthesise memory, summarise the day, prepare the agenda.
+Inputs:   The day's digest, the agent's memory, open TODOS.md items, scheduled jobs.
+Outputs:  One morning-brief string; memory edits applied via memory_dreaming.
+Key fns:  second_brain_overnight, open_todos, build_agenda, dream_brief.
+Deps:     digest, memory_dreaming.
+Note:     State backup and memory decay are run by the manager, not here.
+Updated:  2026-07-31
+
 While you sleep, Alfred does four quiet things:
   * synthesise memory — consolidate durable context and retire stale notes
   * summarise the day  — reuses the daily digest (#7)

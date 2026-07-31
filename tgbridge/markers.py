@@ -1,5 +1,13 @@
 """Marker protocol: structured directives Claude embeds in its replies.
 
+Purpose:  Parses the ⟦…⟧ directives Claude embeds in a reply (send, buttons, remind…).
+Inputs:   Raw reply text from the agent; natural-language times for scheduling.
+Outputs:  A Parsed record — cleaned text plus extracted directives — and fire times.
+Key fns:  parse, parse_when, next_fire.
+Deps:     none (pure) — handlers/session/scheduler act on what it returns.
+Note:     The legacy path; bridgetools.py exposes the same actions as real tools.
+Updated:  2026-07-31
+
     ⟦SEND:<absolute path>⟧             send a file/photo to the user
     ⟦BUTTONS:label|label|...⟧          attach quick-reply buttons to this message
     ⟦TO:<agent-or-peer>|<message>⟧     bot-to-bot message (rate-limited, hop-capped)

@@ -1,5 +1,13 @@
 """Daily digest — a short "here's what I did" summary (issue #7).
 
+Purpose:  Builds the daily "what happened today" summary from data the bridge already has.
+Inputs:   state/audit.jsonl, today's cost, memory size, upcoming scheduler jobs.
+Outputs:  A formatted digest string for Telegram.
+Key fns:  summarize_audit, categorize_tool, tool_breakdown, build_digest.
+Deps:     config (AUDIT_FILE); cost/memory/job data is passed in by the caller.
+Note:     No LLM call — pure aggregation, so it is free and always available.
+Updated:  2026-07-31
+
 The health report answers "is the bridge OK"; the digest answers "what
 happened today". It's assembled from data the bridge already keeps — the audit
 trail (tool calls per agent), today's cost, memory size, and upcoming jobs — so

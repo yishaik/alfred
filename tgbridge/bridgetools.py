@@ -1,5 +1,13 @@
 """In-process MCP server exposing bridge actions as real tools.
 
+Purpose:  Exposes bridge actions (send file, buttons, remind, memory…) to Claude as tools.
+Inputs:   Tool calls from the claude subprocess; one server is built per AgentSession.
+Outputs:  Tool results back to Claude; effects run through the session's outbox/manager.
+Key fns:  build_bridge_server(session), SERVER_NAME, ALLOWED, _run_node.
+Deps:     claude_agent_sdk (sdk mcp server), config; closes over the owning session.
+Note:     markers.py still parses the legacy ⟦…⟧ text form as a fallback.
+Updated:  2026-07-31
+
 This replaces the legacy ⟦…⟧ text markers (still parsed as a fallback) with
 proper tool calls: schemas, validation, and immediate success/error feedback
 to Claude. One server instance is built per session so handlers close over it.

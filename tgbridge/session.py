@@ -1,6 +1,14 @@
 """One AgentSession = one long-lived Claude Agent SDK client bound to a
 Telegram route (chat or forum topic).
 
+Purpose:  One long-lived Claude SDK client bound to one Telegram route, plus its turn queue.
+Inputs:   User/scheduler/peer turns; SDK messages from the claude subprocess; hook calls.
+Outputs:  Streamed replies via the outbox, tool traces, cost records, permission prompts.
+Key fns:  AgentSession.start/stop/restart/feed/collect, _send_turn, _consume, _crash_restart.
+Deps:     claude_agent_sdk, outbox, guards, bridgetools, mood, soul, ratelimit, fmt.
+Note:     stderr_gist() carries the subprocess's last words into every failure message.
+Updated:  2026-07-31
+
 Reliability rules baked in:
   * queued user turns survive crashes/restarts (re-fed, never silently dropped)
   * crash restarts back off exponentially; after repeated fast failures the
@@ -366,6 +374,21 @@ class AgentSession:
             if fut and not fut.done():
                 fut.set_result(f"(no result: {reason})")
 
+    def stderr_gist(self, lines: int = 3, limit: int = 300) -> str:
+        """Last few stderr lines from the claude subprocess.
+
+        The SDK raises ProcessError("Command failed with exit code 1 / Check
+        stderr output for details") — on its own that says nothing, so every
+        place that reports a start/send failure appends this. Empty string when
+        the subprocess never wrote anything (then the exception IS the story).
+        """
+        tail = "\n".join(list(self.stderr_tail)[-lines:]).strip()
+        return tail[-limit:]
+
+    def schedule_reconnect(self):
+        """Public entry point for the manager: retry a start that failed."""
+        self._ensure_reconnect()
+
     def _ensure_reconnect(self):
         """Guarantee forward progress after a failed start/send: schedule one
         backed-off crash-restart (which retries connect and drains the queue)
@@ -376,14 +399,11 @@ class AgentSession:
             return
         self._crash_task = asyncio.create_task(self._crash_restart())
 
-    async def _start_locked(self, resume: bool = True, fork: bool = False):
-        if self.connected and self.client:
-            return                       # a racing path already brought us up
-        self._stopping = False
-        if not resume:
-            self.session_id = None
-        self.outbox.start()
-        self._ensure_workdir()
+    async def _connect(self, fork: bool) -> ClaudeSDKClient:
+        """One connect attempt. Clears the stderr tail first so the lines it
+        collects belong to THIS attempt (callers read them to classify the
+        failure), and never leaves a half-open client behind."""
+        self.stderr_tail.clear()
         client = ClaudeSDKClient(self._options(fork=fork))
         try:
             await client.connect()
@@ -399,6 +419,39 @@ class AgentSession:
                 pass
             self.connected = False
             raise
+        return client
+
+    def _resume_is_stale(self) -> bool:
+        """True when the CLI refused the resume id itself. The transcript lives
+        in ~/.claude, not in state/ — restore a state backup onto a different
+        machine (or let ~/.claude get pruned) and the saved id points at nothing.
+        Every start then fails identically, which reads as "Claude is broken"."""
+        tail = " ".join(self.stderr_tail).lower()
+        return "no conversation found" in tail
+
+    async def _start_locked(self, resume: bool = True, fork: bool = False):
+        if self.connected and self.client:
+            return                       # a racing path already brought us up
+        self._stopping = False
+        if not resume:
+            self.session_id = None
+        self.outbox.start()
+        self._ensure_workdir()
+        try:
+            client = await self._connect(fork)
+        except Exception:
+            if not (self.session_id and self._resume_is_stale()):
+                raise
+            # resuming this id can only ever fail — drop it and start clean
+            # rather than crash-looping until Backoff eventually gives up.
+            log.warning("session %s: resume id %s is unknown to the CLI — "
+                        "starting a fresh session", self.skey, self.session_id)
+            self.outbox.emit("🧹 The saved conversation no longer exists on this "
+                             "machine — starting a fresh session (history is in "
+                             "memory, not lost).")
+            self.session_id = None
+            self.mgr.save_session_id(self.skey, None)
+            client = await self._connect(fork)
         self.client = client
         self.connected = True
         self.busy = False
@@ -454,7 +507,10 @@ class AgentSession:
             try:
                 await self._start_locked(resume=resume, fork=fork)
             except Exception as e:
-                self.outbox.emit(f"❌ restart failed: {e}")
+                self.outbox.emit(f"❌ restart failed: {e}"
+                                 + (f"\n{g}" if (g := self.stderr_gist()) else ""))
+                log.error("restart failed for %s: %s | stderr: %s",
+                          self.skey, e, self.stderr_gist() or "(empty)")
                 return
         self.pending = deque(keep, maxlen=64)
         await self._drain()
@@ -599,7 +655,10 @@ class AgentSession:
             try:
                 await self.start(resume=True)
             except Exception as e:
-                self.outbox.emit(f"❌ can't start Claude: {e}")
+                self.outbox.emit(f"❌ can't start Claude: {e}"
+                                 + (f"\n{g}" if (g := self.stderr_gist()) else ""))
+                log.error("start failed for %s on send: %s | stderr: %s",
+                          self.skey, e, self.stderr_gist() or "(empty)")
                 self.pending.appendleft((text, source))
                 self._fail_capture(f"can't start Claude: {e}")
                 self._react("😱")
@@ -690,14 +749,14 @@ class AgentSession:
         self.mood.note_restart(crashed=True)   # next turn will be a touch careful
         self.mgr.note_crash()                  # feeds auto-escalation (#8)
         delay, drop_resume = self.backoff.record()
-        tail = "\n".join(list(self.stderr_tail)[-3:])
+        tail = self.stderr_gist()
         note = f"⚠️ Claude exited. Restarting in {delay:.0f}s…"
         if drop_resume and self.session_id:
             note += " (repeated crashes — starting a FRESH session)"
             self.session_id = None
             self.mgr.save_session_id(self.skey, None)
         if tail:
-            note += f"\n{tail[:300]}"
+            note += f"\n{tail}"
         self.outbox.emit(note)
         await asyncio.sleep(delay)
         if self._stopping:
@@ -708,7 +767,10 @@ class AgentSession:
             try:
                 await self._start_locked(resume=self.session_id is not None)
             except Exception as e:
-                self.outbox.emit(f"❌ restart failed: {e} — /restart to retry")
+                self.outbox.emit(f"❌ restart failed: {e} — /restart to retry"
+                                 + (f"\n{g}" if (g := self.stderr_gist()) else ""))
+                log.error("crash-restart failed for %s: %s | stderr: %s",
+                          self.skey, e, self.stderr_gist() or "(empty)")
                 return
         if self.pending:
             self.outbox.emit(f"🔁 re-sending {len(self.pending)} queued message(s)")
