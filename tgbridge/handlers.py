@@ -288,6 +288,34 @@ async def cmd_status(update: Update, ctx):
     await update.message.reply_text(txt[:4000], reply_markup=panel_kb(s))
 
 
+async def cmd_backup(update: Update, ctx):
+    """Back up state + the kb vault now and mirror it offsite, on demand.
+
+    The daily backup only fires from the health loop at HEALTH_TIME, so a
+    machine that is updated in the evening and shut down before morning never
+    pushes anything. This is the "I am about to lose this box" button."""
+    import os
+    m = mgr(ctx)
+    await update.message.reply_text("📦 מגבה…")
+    try:
+        # _backup_state skips a zip that already exists for today; drop it first
+        # so an explicit /backup always captures the CURRENT state.
+        from .config import BACKUP_DIR
+        from datetime import date as _d
+        today = BACKUP_DIR / f"state-{_d.today().strftime('%Y%m%d')}.zip"
+        if today.exists():
+            today.unlink()
+        await asyncio.to_thread(m._backup_state)
+        size = today.stat().st_size if today.exists() else 0
+        target = os.environ.get("BRIDGE_BACKUP_REPO") or os.environ.get(
+            "BRIDGE_BACKUP_DIR") or "(none configured — local only!)"
+        await update.message.reply_text(
+            f"✅ {today.name} · {size:,} bytes\nמראה: {target}")
+    except Exception as e:
+        log.exception("manual backup failed")
+        await update.message.reply_text(f"❌ הגיבוי נכשל: {e}")
+
+
 async def cmd_version(update: Update, ctx):
     """Which code is actually running — commit, dirty flag, uptime, model.
     Without this you cannot tell whether an edit on disk is live."""
