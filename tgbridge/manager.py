@@ -447,15 +447,28 @@ class AgentManager:
 
     def _backup_offsite(self, zip_path) -> None:
         """Mirror the backup off this disk (a same-disk backup doesn't survive the
-        failure it exists for). Target: BRIDGE_BACKUP_DIR, else OneDrive if present."""
+        failure it exists for).
+
+        Targets, in order: BRIDGE_BACKUP_REPO (a git clone — the only genuinely
+        offsite option on a cloud VM with one disk), then BRIDGE_BACKUP_DIR, then
+        OneDrive if present. With none configured this used to `return` silently,
+        so on any machine without OneDrive the mirror was a no-op that looked
+        healthy for as long as you cared to not check. It warns now."""
+        import os
+        from pathlib import Path
+        if os.environ.get("BRIDGE_BACKUP_REPO", "").strip():
+            self._backup_to_repo(zip_path)
+            return
         try:
-            import os
             import shutil as _sh
-            from pathlib import Path
             dest = os.environ.get("BRIDGE_BACKUP_DIR", "").strip()
             root = Path(dest) if dest else Path.home() / "OneDrive" / "AlfredBackup"
             if not dest and not root.parent.exists():
-                return  # no OneDrive on this machine and nothing configured
+                log.warning(
+                    "no offsite backup target: set BRIDGE_BACKUP_REPO (git clone) "
+                    "or BRIDGE_BACKUP_DIR. %s is the only copy of the state and "
+                    "the kb vault, and it lives on this disk.", zip_path)
+                return
             root.mkdir(parents=True, exist_ok=True)
             _sh.copy2(zip_path, root / zip_path.name)
             for old in sorted(root.glob("state-*.zip"))[:-14]:
@@ -466,6 +479,51 @@ class AgentManager:
             log.info("offsite backup -> %s", root / zip_path.name)
         except Exception:
             log.exception("offsite backup failed")
+
+    def _backup_to_repo(self, zip_path) -> None:
+        """Commit the daily zip into BRIDGE_BACKUP_REPO and push.
+
+        The repo MUST be private: the zip carries audit/session state and the kb
+        vault. Push failures are logged, never raised — a backup that takes the
+        bridge down is worse than a backup that missed a day."""
+        import os
+        import shutil as _sh
+        import subprocess
+        from pathlib import Path
+        repo = Path(os.environ["BRIDGE_BACKUP_REPO"].strip()).expanduser()
+        try:
+            if not (repo / ".git").is_dir():
+                log.error("BRIDGE_BACKUP_REPO %s is not a git clone", repo)
+                return
+            _sh.copy2(zip_path, repo / zip_path.name)
+            for old in sorted(repo.glob("state-*.zip"))[:-14]:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+
+            def git(*args, timeout=120):
+                return subprocess.run(["git", "-C", str(repo), *args],
+                                      capture_output=True, text=True, timeout=timeout)
+
+            git("add", "-A")
+            # Nothing staged means the zip is byte-identical to the last push;
+            # `git commit` would exit 1 and look like a failure, so skip it.
+            if not git("diff", "--cached", "--quiet").returncode:
+                log.info("offsite repo already current (%s)", zip_path.name)
+                return
+            committed = git("commit", "-m", f"state backup {zip_path.stem}")
+            if committed.returncode:
+                log.error("offsite commit failed: %s", committed.stderr.strip()[:300])
+                return
+            pushed = git("push", timeout=300)
+            if pushed.returncode:
+                log.error("offsite push failed (commit is local): %s",
+                          pushed.stderr.strip()[:300])
+                return
+            log.info("offsite backup pushed -> %s", repo.name)
+        except (OSError, subprocess.SubprocessError):
+            log.exception("offsite repo backup failed")
 
     async def _health_loop(self):
         h, m = (int(x) for x in HEALTH_TIME.split(":"))
