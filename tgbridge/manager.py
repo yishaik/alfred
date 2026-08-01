@@ -463,6 +463,18 @@ class AgentManager:
         except Exception:
             log.exception("state backup failed")
 
+    @staticmethod
+    def _instance_id() -> str:
+        """Stable per-instance tag for offsite backup filenames. Several bridges
+        (local PC, cloud VM, per-agent services) share one backup repo; without
+        a tag they overwrite each other's state-YYYYMMDD.zip and the retention
+        sweep deletes the other machine's history."""
+        import os
+        import platform
+        import re
+        raw = os.environ.get("BRIDGE_INSTANCE_NAME", "").strip() or platform.node() or "unknown"
+        return re.sub(r"[^A-Za-z0-9_-]", "-", raw).lower()
+
     def _backup_offsite(self, zip_path) -> None:
         """Mirror the backup off this disk (a same-disk backup doesn't survive the
         failure it exists for).
@@ -488,13 +500,15 @@ class AgentManager:
                     "the kb vault, and it lives on this disk.", zip_path)
                 return
             root.mkdir(parents=True, exist_ok=True)
-            _sh.copy2(zip_path, root / zip_path.name)
-            for old in sorted(root.glob("state-*.zip"))[:-14]:
+            iid = self._instance_id()
+            dest_name = f"{zip_path.stem}-{iid}{zip_path.suffix}"
+            _sh.copy2(zip_path, root / dest_name)
+            for old in sorted(root.glob(f"state-*-{iid}.zip"))[:-14]:
                 try:
                     old.unlink()
                 except OSError:
                     pass
-            log.info("offsite backup -> %s", root / zip_path.name)
+            log.info("offsite backup -> %s", root / dest_name)
         except Exception:
             log.exception("offsite backup failed")
 
@@ -513,8 +527,10 @@ class AgentManager:
             if not (repo / ".git").is_dir():
                 log.error("BRIDGE_BACKUP_REPO %s is not a git clone", repo)
                 return
-            _sh.copy2(zip_path, repo / zip_path.name)
-            for old in sorted(repo.glob("state-*.zip"))[:-14]:
+            iid = self._instance_id()
+            dest_name = f"{zip_path.stem}-{iid}{zip_path.suffix}"
+            _sh.copy2(zip_path, repo / dest_name)
+            for old in sorted(repo.glob(f"state-*-{iid}.zip"))[:-14]:
                 try:
                     old.unlink()
                 except OSError:
@@ -528,9 +544,9 @@ class AgentManager:
             # Nothing staged means the zip is byte-identical to the last push;
             # `git commit` would exit 1 and look like a failure, so skip it.
             if not git("diff", "--cached", "--quiet").returncode:
-                log.info("offsite repo already current (%s)", zip_path.name)
+                log.info("offsite repo already current (%s)", dest_name)
                 return
-            committed = git("commit", "-m", f"state backup {zip_path.stem}")
+            committed = git("commit", "-m", f"state backup {zip_path.stem} ({iid})")
             if committed.returncode:
                 log.error("offsite commit failed: %s", committed.stderr.strip()[:300])
                 return
