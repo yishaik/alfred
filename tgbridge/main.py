@@ -11,6 +11,7 @@ Updated:  2026-07-12
 
 import asyncio
 import logging
+import time
 from logging.handlers import RotatingFileHandler
 
 from telegram import Update
@@ -177,6 +178,37 @@ def _disable_wmi_platform_lookup():
     platform._wmi_query = _no_wmi
 
 
+def _await_dns(host: str = "api.telegram.org", budget: float = 900.0) -> bool:
+    """Block until `host` resolves, or the budget runs out.
+
+    A cold boot brings the bridge up before the resolver is usable (Oracle's
+    VCN nameserver at 169.254.169.254 is the only one DHCP hands out). PTB's
+    initialize() calls get_me() straight away, so an unresolvable host used to
+    kill the process in ~1s; the supervisor then climbed its backoff ladder to
+    the 300s rung and Alfred sat offline for 47 minutes on 2026-08-01 even
+    though DNS had come back long before. Waiting in-process instead means we
+    reconnect within seconds of the resolver working, and a genuinely broken
+    network still exits (non-zero) once the budget is spent."""
+    import socket
+    delay, waited, complained = 2.0, 0.0, False
+    while True:
+        try:
+            socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+            if complained:
+                log.warning("DNS recovered after %.0fs — starting poller", waited)
+            return True
+        except socket.gaierror as e:
+            if waited >= budget:
+                log.error("no DNS for %s after %.0fs (%s) — giving up", host, waited, e)
+                return False
+            if not complained:
+                log.warning("%s does not resolve yet (%s) — waiting for DNS", host, e)
+                complained = True
+            time.sleep(delay)
+            waited += delay
+            delay = min(delay * 2, 30.0)
+
+
 _lock_sock = None
 
 
@@ -296,6 +328,8 @@ def main():
     app.add_error_handler(handlers.on_error)
 
     print(f"[bridge] starting — chat={CHAT_ID} group={GROUP_ID or '-'}")
+    if not _await_dns():
+        raise SystemExit(1)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
     # run_polling returns on a clean shutdown. handlers.exit_code is non-zero
     # only when a handler asked to stay down for a while (sustained getUpdates
