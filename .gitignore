@@ -20,3 +20,22 @@ collapse.log
 
 # ...but the committed template must be tracked
 !.env.example
+
+# Per-agent bridge instances (own bot tokens, own sessions/KB) — this repo is
+# PUBLIC. `.env.*` above does not match `.env-<name>`; these do.
+.env-*
+state-*/
+.token-*
+.herenow/
+
+# secretbox writes secrets into .env; the server itself is safe to commit
+pages.json
+tasks.json
+custom_slots.json
+.bootstrap.json
+
+# Secret stores — never committed. vault.json alone holds ~180 credentials.
+vault.json
+grants.json
+bootstrap-claims.jsonl
+.secret-migration/

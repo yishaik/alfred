@@ -26,11 +26,32 @@ import logging
 
 import httpx
 
-from .config import PEER_BIND, PEER_NAME, PEER_PORT, PEER_TOKEN, PEERS
+import hmac
+
+from .config import (LEGACY_PEERS, PEER_BIND, PEER_NAME, PEER_PORT,
+                     PEER_SELF_TOKEN, PEER_TOKEN, PEER_TOKENS, PEERS)
 
 log = logging.getLogger("bridge.peers")
 
 _MAX_BODY = 64 * 1024
+
+
+def identify(token: str) -> tuple[str | None, bool]:
+    """Map a presented token to the peer that owns it.
+
+    Returns (peer_name, verified). `verified` is False for the legacy shared
+    token, which proves only "some peer", not which one — the caller must then
+    fall back to the self-declared name and treat it as unverified. Once every
+    peer has its own entry, BRIDGE_PEER_TOKEN can be dropped and this returns
+    (None, False) for anything unrecognised."""
+    if not token:
+        return None, False
+    for name, tok in PEER_TOKENS.items():
+        if hmac.compare_digest(token, tok):
+            return name, True
+    if PEER_TOKEN and hmac.compare_digest(token, PEER_TOKEN):
+        return None, False          # authentic, but anonymous
+    return None, False
 
 
 class PeerBus:
@@ -43,7 +64,10 @@ class PeerBus:
         return name in PEERS
 
     async def start(self):
-        if PEER_PORT and PEER_TOKEN:
+        # Gate on having ANY credential — per-peer table or the old shared
+        # secret. Checking only PEER_TOKEN silently refused to listen once the
+        # shared secret was retired, which takes the bus down without an error.
+        if PEER_PORT and (PEER_TOKENS or PEER_TOKEN):
             # loopback unless BRIDGE_PEER_BIND says otherwise — an all-interfaces
             # listener should be a deliberate choice, not the default
             self._server = await asyncio.start_server(
@@ -51,8 +75,8 @@ class PeerBus:
             log.info("peer bus listening on %s:%d as %r",
                      PEER_BIND, PEER_PORT, PEER_NAME)
         elif PEER_PORT:
-            log.warning("BRIDGE_PEER_PORT set but BRIDGE_PEER_TOKEN empty — "
-                        "refusing to listen unauthenticated")
+            log.warning("BRIDGE_PEER_PORT set but no BRIDGE_PEER_TOKENS or "
+                        "BRIDGE_PEER_TOKEN — refusing to listen unauthenticated")
 
     async def stop(self):
         if self._server:
@@ -102,8 +126,12 @@ class PeerBus:
         if not url:
             return False
         try:
+            # A pre-per-peer peer checks the token against its own, so send it
+            # the one it expects; everyone else gets ours, which is what lets
+            # them derive who we are.
+            tok = (PEER_TOKENS.get(peer) if peer in LEGACY_PEERS else None) or PEER_SELF_TOKEN
             r = await self._http.post(url + "/msg", json={
-                "token": PEER_TOKEN, "from": f"{PEER_NAME}/{src_agent}",
+                "token": tok, "from": f"{PEER_NAME}/{src_agent}",
                 "agent": "", "text": text, "hop": hop})
             return r.status_code == 200
         except Exception as e:
@@ -125,15 +153,32 @@ class PeerBus:
                 return
             body = json.loads(await asyncio.wait_for(
                 reader.readexactly(clen), timeout=10))
-            if body.get("token") != PEER_TOKEN:
+            presented = str(body.get("token", ""))
+            who, verified = identify(presented)
+            legacy_ok = bool(PEER_TOKEN) and hmac.compare_digest(presented, PEER_TOKEN)
+            if not verified and not legacy_ok:
                 await self._respond(writer, 403, {"ok": False})
                 return
             await self._respond(writer, 200, {"ok": True})
+
+            # Identity comes from the token when we can derive it. The claimed
+            # `from` is kept only for the agent suffix (alice/main) and only
+            # when unverified — it is sender-controlled, so it must never be
+            # what a rate limit or a grant is keyed on.
+            claimed = str(body.get("from", "?"))[:60]
+            if verified:
+                suffix = claimed.partition("/")[2]
+                origin = f"{who}/{suffix}" if suffix else who
+            else:
+                origin = claimed
+                log.warning("peer msg authenticated with the LEGACY shared "
+                            "token; identity %r is unverified", claimed)
             await self.mgr.on_peer_message(
-                str(body.get("from", "?"))[:60],
+                origin,
                 str(body.get("agent", ""))[:30],
                 str(body.get("text", ""))[:8000],
-                int(body.get("hop", 0)))
+                int(body.get("hop", 0)),
+                verified=verified)
         except Exception as e:
             log.warning("peer message failed: %s", e)
             try:

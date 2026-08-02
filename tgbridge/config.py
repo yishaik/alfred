@@ -19,8 +19,13 @@ import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-STATE_DIR = ROOT / "state"
-STATE_DIR.mkdir(exist_ok=True)
+# BRIDGE_STATE_DIR lets a second bridge process (a dedicated per-project agent
+# with its own bot token) keep its own sessions, memory and KB instead of
+# fighting the main instance over these files. Unset = the original path, so
+# existing installs are unaffected.
+_state_override = os.environ.get("BRIDGE_STATE_DIR", "").strip()
+STATE_DIR = Path(_state_override).expanduser() if _state_override else ROOT / "state"
+STATE_DIR.mkdir(parents=True, exist_ok=True)
 
 # All bridge temp files live on the project drive — the system drive filling
 # up must not break TTS / file sending / the claude subprocess.
@@ -104,7 +109,23 @@ def _load_env(path: Path) -> None:
         pass
 
 
-_load_env(ROOT / ".env")
+# BRIDGE_ENV_FILE points a second bridge process at its own config. Without it
+# every instance would load ROOT/.env — and since a non-empty .env value wins
+# over the OS env, a dedicated agent would silently inherit the MAIN bot token
+# and then fight the main bridge over getUpdates.
+_env_file = os.environ.get("BRIDGE_ENV_FILE", "").strip()
+_load_env(Path(_env_file).expanduser() if _env_file else ROOT / ".env")
+
+# The claude subprocess inherits our os.environ, and an API key there BEATS the
+# Max subscription OAuth in ~/.claude/.credentials.json — so a stray sk-ant-…
+# (ours came from a kitchen-sink .env) silently diverts every session onto
+# pay-as-you-go Console billing. With an empty balance that surfaced in Telegram
+# as "credit balance is too low to access the Anthropic API". Nothing in the
+# bridge reads these (the model router uses OPENROUTER_/GEMINI_ keys), so drop
+# them unconditionally: the subscription must always win.
+for _v in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+           "ANTHROPIC_MODEL"):
+    os.environ.pop(_v, None)
 
 # The Claude Agent SDK derives the `initialize` handshake timeout from this env
 # var read out of OUR process's environment (claude_agent_sdk/client.py reads
@@ -168,6 +189,37 @@ for _part in os.environ.get("BRIDGE_PEERS", "").split(";"):
         _n, _, _u = _part.partition("=")
         if _n.strip() and _u.strip():
             PEERS[_n.strip()] = _u.strip().rstrip("/")
+
+# Per-peer tokens: "alfred-cloud=tok;tlvquest=tok;robin=tok".
+#
+# With ONE shared token the `from` field on an inbound message is self-declared
+# and therefore worth nothing: any holder of the token can claim to be any peer,
+# which also makes per-peer secret grants a label rather than a control. With a
+# table, the sender's identity is DERIVED from which token it presented, so it
+# cannot be claimed at all.
+#
+# BRIDGE_PEER_TOKEN stays as the legacy shared secret and is still accepted
+# inbound, so peers can be migrated one at a time instead of all at once. Drop
+# it once every peer appears in the table.
+PEER_TOKENS: dict[str, str] = {}
+for _part in os.environ.get("BRIDGE_PEER_TOKENS", "").split(";"):
+    if "=" in _part:
+        _n, _, _t = _part.partition("=")
+        if _n.strip() and _t.strip():
+            PEER_TOKENS[_n.strip()] = _t.strip()
+
+# What we present when sending. Our own entry if we have one, else the legacy
+# shared token, so an un-migrated bridge keeps talking.
+PEER_SELF_TOKEN = PEER_TOKENS.get(PEER_NAME) or PEER_TOKEN
+
+# Peers running the pre-per-peer code. They authenticate an inbound message by
+# comparing it to their OWN single token, so they must be sent that token rather
+# than ours — otherwise they reject us. It costs nothing here and saves a code
+# change on a machine we do not control. Because such a peer's token is now
+# unique to it, its messages still identify it unambiguously.
+LEGACY_PEERS = {p.strip() for p in
+                os.environ.get("BRIDGE_PEER_LEGACY", "").replace(";", ",").split(",")
+                if p.strip()}
 
 # --------------------------------------------------------------------------- #
 # Rate limits — these exist to prevent infinite loops (bot<->bot ping-pong,
