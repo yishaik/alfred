@@ -92,18 +92,43 @@ def _simple(url, hdr, ok=(200,), **kw):
     return f
 
 
+# Listing models proves the key is accepted. It does NOT prove the account can
+# do anything: OpenAI answers /v1/models happily on a balance of zero and then
+# refuses every completion, and xAI does the same once a team hits its spending
+# limit. Both looked green here while being useless. For anything we actually
+# send work to, spend one token and find out.
+def _chat(url, model, **kw):
+    body = json.dumps({"model": model, "max_tokens": 1,
+                       "messages": [{"role": "user", "content": "hi"}]})
+
+    def f(v):
+        code, text = curl(url, ["Authorization: Bearer $S"], {"S": v[0]},
+                          "POST", body, **kw)
+        if code == 200:
+            return True, "completes"
+        low = (text or "").lower()
+        if any(w in low for w in ("credit", "quota", "billing", "spending limit",
+                                  "insufficient_quota", "exceeded")):
+            return "warn", f"HTTP {code} — key valid, account cannot pay"
+        if code in (401, 403) and "permission-denied" in low:
+            return "warn", f"HTTP {code} — key valid, access denied"
+        return False, f"HTTP {code}"
+    return f
+
+
 CHECKS: dict[str, tuple[list[str], object, str]] = {
     "OPENAI_API_KEY": (["OPENAI_API_KEY"],
-        _simple("https://api.openai.com/v1/models", "Authorization: Bearer $S"), "OpenAI"),
+        _chat("https://api.openai.com/v1/chat/completions", "gpt-4.1-mini"), "OpenAI"),
     "GROQ_API_KEY": (["GROQ_API_KEY"],
-        _simple("https://api.groq.com/openai/v1/models", "Authorization: Bearer $S"), "Groq"),
+        _chat("https://api.groq.com/openai/v1/chat/completions", "openai/gpt-oss-20b"), "Groq"),
     "OPENROUTER_API_KEY": (["OPENROUTER_API_KEY"],
-        _simple("https://openrouter.ai/api/v1/key", "Authorization: Bearer $S"), "OpenRouter"),
+        _chat("https://openrouter.ai/api/v1/chat/completions",
+              "google/gemma-4-26b-a4b-it:free"), "OpenRouter"),
     "XAI_API_KEY": (["XAI_API_KEY"],
-        _simple("https://api.x.ai/v1/models", "Authorization: Bearer $S"), "xAI / Grok"),
+        _chat("https://api.x.ai/v1/chat/completions", "grok-4-fast"), "xAI / Grok"),
     "GEMINI_API_KEY": (["GEMINI_API_KEY"],
-        _simple("https://generativelanguage.googleapis.com/v1beta/models",
-                "x-goog-api-key: $S"), "Google Gemini"),
+        _chat("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+              "gemini-flash-latest"), "Google Gemini"),
     "GOOGLE_API_KEY": (["GOOGLE_API_KEY"],
         _simple("https://generativelanguage.googleapis.com/v1beta/models",
                 "x-goog-api-key: $S"), "Google (generic)"),
@@ -210,25 +235,35 @@ def main(argv):
                           for n, l, o, d in results], ensure_ascii=False, indent=1))
         return 0
     good = [r for r in results if r[2] is True]
+    warn = [r for r in results if r[2] == "warn"]
     bad = [r for r in results if r[2] is False]
     skip = [r for r in results if r[2] is None]
 
     # Age never told us whether a key still authenticates, so the weekly job
     # runs this too and reports the ones the service itself rejected.
-    if "--notify" in argv and bad:
+    if "--notify" in argv and (bad or warn):
+        parts = []
+        if bad:
+            parts.append("🔐 סודות שהשירות דחה:\n" +
+                         "\n".join(f"· {l} ({d})" for _, l, _, d in sorted(bad)))
+        if warn:
+            parts.append("⚠️ מפתחות תקינים שלא יכולים לבצע:\n" +
+                         "\n".join(f"· {l} ({d})" for _, l, _, d in sorted(warn)))
         subprocess.run([str(ALFRED / "opsnotify.sh"),
-                        "🔐 סודות שהשירות דחה:\n" +
-                        "\n".join(f"· {l} ({d})" for _, l, _, d in sorted(bad)) +
+                        "\n\n".join(parts) +
                         "\n\nhttps://alfred.tailbb9b2e.ts.net/secrets"],
                        capture_output=True, timeout=25)
-    for title, group, mark in (("עובד", good, "✅"), ("נכשל", bad, "❌"),
+    for title, group, mark in (("עובד", good, "✅"),
+                               ("מאמת אך לא מבצע", warn, "⚠️"),
+                               ("נכשל", bad, "❌"),
                                ("לא נבדק", skip, "○")):
         if not group:
             continue
         print(f"\n{mark} {title} ({len(group)})")
         for n, l, _, d in sorted(group):
             print(f"   {n:<32} {l:<28} {d}")
-    print(f"\nסה\"כ: {len(good)} עובדים, {len(bad)} נכשלו, {len(skip)} לא נבדקו")
+    print(f"\nסה\"כ: {len(good)} עובדים, {len(warn)} מאמתים בלבד, "
+          f"{len(bad)} נכשלו, {len(skip)} לא נבדקו")
     return 1 if bad else 0
 
 
