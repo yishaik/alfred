@@ -95,6 +95,10 @@ Deferred deliberately on 2026-08-01 — the critical read path is covered.
 ---
 
 ## ✅ Done (recent)
+- [x] **Automatic engine failover on exhausted usage** — a rejected Claude turn
+      is replayed through Codex and the live session switches to Codex; Codex
+      quota exhaustion replays through Claude and switches back. Narrow matching
+      avoids treating network/context-limit failures as plan exhaustion — 2026-08-02
 - [x] **Boot-time DNS crash loop** — the 2026-08-01 04:47 boot came up before the
       resolver worked; PTB's get_me() raised, the bridge exited rc=1 in ~1s, and
       the supervisor ladder parked it on the 300s rung — 47 min offline, 13 fast

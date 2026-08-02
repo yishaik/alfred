@@ -1214,6 +1214,80 @@ async def test_router_failsafe_feed():
           sent == ["hello world"], str(sent))
 
 
+async def test_engine_usage_failover():
+    """Hard subscription exhaustion changes engines; ordinary faults do not."""
+    from tgbridge import codex_engine
+    from tgbridge.session import AgentConfig, AgentSession
+
+    check("engine failover: detects usage limit",
+          codex_engine.is_usage_exhausted("You've hit your usage limit"))
+    check("engine failover: detects HTTP 429",
+          codex_engine.is_usage_exhausted("request failed: HTTP 429"))
+    check("engine failover: ignores context limit",
+          not codex_engine.is_usage_exhausted("context window limit exceeded"))
+    check("engine failover: ignores network error",
+          not codex_engine.is_usage_exhausted("connection reset by peer"))
+
+    class FakeMgr:
+        active = "w"
+        bot = object()
+        session_ids = {}
+        agents = {"w": AgentConfig(name="w")}
+        def add_cost(self, cost):
+            return 0.0, None
+
+    class FakeOutbox:
+        def __init__(self):
+            self.messages = []
+            self.muted = False
+        def emit(self, text, *args, **kwargs):
+            self.messages.append(text)
+        def start(self):
+            pass
+        def stop(self):
+            pass
+
+    s = AgentSession(FakeMgr(), AgentConfig(name="w"), "w@p", 1, 1, None)
+    s.outbox = FakeOutbox()
+    s._react = lambda emoji: None
+    s._turn_input_text = "continue this work"
+
+    orig_available = codex_engine.available
+    orig_run = codex_engine.run_turn
+    codex_engine.available = lambda: (True, "test")
+    async def fake_run(*args, **kwargs):
+        return "continued by codex", {"input_tokens": 3, "output_tokens": 4}
+    codex_engine.run_turn = fake_run
+    try:
+        ok = await s._failover_to_codex()
+    finally:
+        codex_engine.available = orig_available
+        codex_engine.run_turn = orig_run
+    check("engine failover: Claude turn replayed", ok is True)
+    check("engine failover: session switches to Codex", s.engine == "codex")
+    check("engine failover: Codex reply delivered",
+          "continued by codex" in s.outbox.messages, str(s.outbox.messages))
+
+    s.engine = "codex"
+    sent = []
+    async def exhausted_run(*args, **kwargs):
+        raise RuntimeError("quota exceeded")
+    async def no_route(text):
+        return text
+    async def fake_send(text, source):
+        sent.append(text)
+    codex_engine.run_turn = exhausted_run
+    s._maybe_route = no_route
+    s._send_turn = fake_send
+    try:
+        ok = await s.feed("same request")
+    finally:
+        codex_engine.run_turn = orig_run
+    check("engine failover: Codex exhaustion replays turn",
+          ok is True and sent == ["same request"], str(sent))
+    check("engine failover: session switches back to Claude", s.engine == "claude")
+
+
 async def test_router_should_refine():
     from tgbridge import router
     cfg = router.RouterConfig()   # defaults: refine enabled, mode auto, min 40
@@ -1436,6 +1510,7 @@ if __name__ == "__main__":
     asyncio.run(test_router_manual_excluded_from_auto())
     asyncio.run(test_router_picker_pin_failsafe())
     asyncio.run(test_router_failsafe_feed())
+    asyncio.run(test_engine_usage_failover())
     asyncio.run(test_router_should_refine())
     test_router_rubric_loader()
     asyncio.run(test_router_refine_guards())

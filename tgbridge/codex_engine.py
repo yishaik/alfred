@@ -3,7 +3,7 @@
 Purpose:  Run a turn through the ChatGPT/Codex subscription instead of Claude.
 Inputs:   A prompt, the agent's stored Codex thread id, the working directory.
 Outputs:  The reply text; the thread id is persisted for continuity.
-Key fns:  available(), run_turn(), thread_for/clear_thread.
+Key fns:  available(), run_turn(), is_usage_exhausted(), thread_for/clear_thread.
 Deps:     the `codex` CLI (~/.local/bin/codex), authenticated against ChatGPT.
 Updated:  2026-08-02
 
@@ -50,6 +50,23 @@ CODEX_BIN = os.environ.get("BRIDGE_CODEX_BIN", "") or shutil.which("codex") or \
 # One thread id per agent, so /engine codex resumes where it left off rather
 # than starting fresh on every message.
 _threads: dict[str, str] = {}
+
+# Keep this deliberately narrower than a generic "limit" search: context-window,
+# tool-output and file-size limits are turn-specific and must not move the whole
+# conversation to another subscription. These phrases describe account capacity.
+_USAGE_LIMIT_PHRASES = (
+    "usage limit", "quota exceeded", "quota_exceeded", "rate limit exceeded",
+    "rate_limit_exceeded", "too many requests", "insufficient quota",
+    "insufficient_quota", "credits exhausted", "credit balance",
+    "plan limit", "weekly limit", "five-hour limit", "5-hour limit",
+    "you have no weighted tokens left", "http 429", "status 429",
+)
+
+
+def is_usage_exhausted(error: object) -> bool:
+    """True only for an account-level usage/quota exhaustion error."""
+    text = str(error or "").strip().lower()
+    return any(phrase in text for phrase in _USAGE_LIMIT_PHRASES)
 
 
 def available() -> tuple[bool, str]:
