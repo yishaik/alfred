@@ -856,6 +856,52 @@ async def cmd_peers(update: Update, ctx):
     await update.message.reply_text(await m.peers.diagnostics())
 
 
+async def cmd_engine(update: Update, ctx):
+    """Switch this agent between the Claude and Codex subscriptions.
+
+    Per-session on purpose: the point is to move one conversation onto the
+    other plan without disturbing the other agents.
+    """
+    from . import codex_engine
+    s = await _session(update, ctx)
+    arg = " ".join(ctx.args).strip().lower() if ctx.args else ""
+
+    if not arg:
+        ok, mode = codex_engine.available()
+        thread = codex_engine.thread_for(s.cfg.name)
+        await update.message.reply_text(
+            f"🔀 engine: *{getattr(s, 'engine', 'claude')}*\n"
+            f"codex: {'✅ ' + mode if ok else '❌ ' + mode}\n"
+            + (f"codex thread: `{thread[:8]}…`\n" if thread else "")
+            + "\n`/engine claude` · `/engine codex` · `/engine reset` (new codex thread)",
+            parse_mode="Markdown")
+        return
+
+    if arg == "reset":
+        codex_engine.clear_thread(s.cfg.name)
+        await update.message.reply_text("codex thread cleared — next codex turn starts fresh")
+        return
+
+    if arg not in ("claude", "codex"):
+        await update.message.reply_text("usage: /engine [claude|codex|reset]")
+        return
+
+    if arg == "codex":
+        # Check now rather than failing on the next message, when the reason
+        # would be buried in a fallback notice.
+        ok, why = codex_engine.available()
+        if not ok:
+            await update.message.reply_text(f"❌ cannot switch: {why}")
+            return
+
+    s.engine = arg
+    note = ("\n\nNote: the bridge's own tools (files, memory, scheduling, peers) "
+            "and the guard hooks are Claude-side. Codex has its own file and "
+            "shell tools, and answers whole rather than streaming."
+            if arg == "codex" else "")
+    await update.message.reply_text(f"🔀 engine → *{arg}*{note}", parse_mode="Markdown")
+
+
 async def cmd_trace(update: Update, ctx):
     """This session's recent tool-call timeline — duration + ok/error (#19)."""
     from . import tracing

@@ -35,12 +35,20 @@ log = logging.getLogger("bridge.tools")
 XREADER_DIR = os.environ.get("BRIDGE_XREADER_DIR", str(Path(WORKDIR) / "x-reader"))
 
 SERVER_NAME = "bridge"
-TOOL_NAMES = ["send_file", "send_buttons", "message_agent",
-              "schedule", "unschedule", "list_jobs",
-              "remember", "forget", "recall", "kb_read",
-              "fetch_content", "route_model"]
-# fully-qualified names for allowed_tools
-ALLOWED = [f"mcp__{SERVER_NAME}__{t}" for t in TOOL_NAMES]
+
+# Derived from the tools themselves, not typed out again. Keeping a parallel
+# list by hand meant adding a tool took an edit in three places, and forgetting
+# one of them produced a tool that existed but was never permitted — a failure
+# that looks like the model refusing to use it. build_tools() fills this in on
+# first call; the module-level default keeps import-time consumers working.
+TOOL_NAMES: list[str] = []
+ALLOWED: list[str] = []
+
+
+def _refresh_names(tools) -> None:
+    global TOOL_NAMES, ALLOWED
+    TOOL_NAMES = [t.name for t in tools]
+    ALLOWED = [f"mcp__{SERVER_NAME}__{t.name}" for t in tools]
 
 
 def _text(msg: str, err: bool = False) -> dict:
@@ -71,8 +79,14 @@ async def _run_node(script: str, *script_args: str, timeout: float = 90.0) -> tu
     return ((out or b"").decode("utf-8", "replace").strip(), proc.returncode or 0)
 
 
-def build_bridge_server(session):
-    """Create the per-session MCP server config for ClaudeAgentOptions."""
+def build_tools(session):
+    """Every bridge tool, as SdkMcpTool objects bound to this session.
+
+    The single source of truth. Claude gets these wrapped in an in-process SDK
+    server; every other engine gets them over stdio through mcp_shim.py, which
+    reads this same list. A tool added here appears in both without any further
+    work — which is the point.
+    """
     mgr = session.mgr
 
     @tool("send_file", "Send a file from disk to the user via Telegram. "
@@ -255,9 +269,16 @@ def build_bridge_server(session):
         out, rc = await _run_node("route.mjs", task, timeout=180.0)
         return _text(out or "(no result)", err=(rc != 0))
 
+
+    tools = [send_file, send_buttons, message_agent,
+             schedule, unschedule, list_jobs,
+             remember, forget, recall, kb_read,
+             fetch_content, route_model]
+    _refresh_names(tools)
+    return tools
+
+
+def build_bridge_server(session):
+    """The in-process MCP server Claude's SDK expects, over the shared tools."""
     return create_sdk_mcp_server(
-        name=SERVER_NAME, version="1.0.0",
-        tools=[send_file, send_buttons, message_agent,
-               schedule, unschedule, list_jobs,
-               remember, forget, recall, kb_read,
-               fetch_content, route_model])
+        name=SERVER_NAME, version="1.0.0", tools=build_tools(session))

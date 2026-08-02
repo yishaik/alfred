@@ -34,7 +34,7 @@ from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
                       ReactionTypeEmoji)
 from telegram.constants import ChatAction
 
-from . import bridgetools, guards, markers, router, voice
+from . import bridgetools, codex_engine, guards, markers, router, voice
 import os
 
 from . import metrics
@@ -244,6 +244,9 @@ class AgentSession:
         # a per-turn flag set when a check-in chose silence (suppress output).
         self.last_activity = time.monotonic()
         self.proactive_armed = True
+        # Which backend answers this agent's turns. Per-session so one
+        # agent can be on Codex while the others stay on Claude.
+        self.engine = os.environ.get("BRIDGE_ENGINE", "claude").strip().lower()
         self._proactive_silent = False
         # undo / context / tasks / telegram-native state
         self.turn_user_uuid: str | None = None
@@ -311,6 +314,11 @@ class AgentSession:
             prompt += f"\n\n{mem_block}"
         if self.cfg.secretary:
             prompt += SECRETARY_PROMPT
+        # Build the server first: ALLOWED is derived from the tool objects, so
+        # reading it before they exist yields an empty allow-list and every
+        # bridge tool is silently forbidden — which looks like the model
+        # refusing to use them rather than a permissions bug.
+        bridge_server = bridgetools.build_bridge_server(self)
         return ClaudeAgentOptions(
             system_prompt={"type": "preset", "preset": "claude_code",
                            "append": prompt},
@@ -318,7 +326,7 @@ class AgentSession:
             include_partial_messages=True,
             permission_mode="bypassPermissions" if self.cfg.auto_approve else None,
             allowed_tools=list(SAFE_TOOLS) + list(bridgetools.ALLOWED),
-            mcp_servers={bridgetools.SERVER_NAME: bridgetools.build_bridge_server(self)},
+            mcp_servers={bridgetools.SERVER_NAME: bridge_server},
             hooks=guards.build_hooks(self),
             enable_file_checkpointing=True,
             extra_args={"replay-user-messages": None},
@@ -533,6 +541,28 @@ class AgentSession:
             # the user is back — reset the idle clock and re-arm proactive
             self.last_activity = time.monotonic()
             self.proactive_armed = True
+
+        # --- alternative backend. Hangs off the same seam the model router
+        # already uses: handled here and returned, so the Claude client is
+        # never started and nothing downstream changes. Failure falls back to
+        # Claude rather than losing the turn.
+        if getattr(self, "engine", "claude") == "codex":
+            try:
+                if echo:
+                    self.outbox.emit(f"▶️ {text}")
+                self.outbox.start()
+                reply, usage = await codex_engine.run_turn(
+                    self.cfg.name, text, self.cfg.workdir)
+                self.outbox.emit(reply)
+                log.info("codex turn for %s: %s in / %s out", self.cfg.name,
+                         usage.get("input_tokens"), usage.get("output_tokens"))
+                return True
+            except Exception as e:
+                log.warning("codex turn failed, falling back to Claude: %s", e)
+                self.outbox.emit(f"⚠️ codex failed ({e}) — this turn goes to Claude")
+            finally:
+                self.outbox.stop()
+
             # --- model router (fail-safe): scheduler/peer/bot turns never routed.
             # ANY error here → log + fall through to the Claude session as today.
             try:

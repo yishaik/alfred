@@ -25,6 +25,7 @@ from .config import (APP_LOG_FILE, BOT_TOKEN, CHAT_ID, GROUP_ID, INBOX,
                      system_drive_free_gb)
 from .manager import AgentManager
 from .peers import PeerBus
+from .toolrpc import ToolRPC
 from .scheduler import Scheduler
 
 log = logging.getLogger("bridge")
@@ -110,6 +111,14 @@ async def post_init(app):
     m.scheduler.start()
     m.peers = PeerBus(m)
     await m.peers.start()
+    # Bridge tools, reachable from outside this process. Only engines that are
+    # not Claude need it, but it costs a loopback listener and starting it
+    # unconditionally means switching engines never requires a restart.
+    m.toolrpc = ToolRPC(m)
+    try:
+        await m.toolrpc.start()
+    except Exception as e:
+        log.warning("tool RPC did not start (non-Claude engines lose bridge tools): %s", e)
     m.start_health_loop()
     m.start_proactive_loop()
     m.start_digest_loop()
@@ -301,6 +310,7 @@ def main():
         "watch": handlers.cmd_watch,
         "unwatch": handlers.cmd_unwatch,
         "peers": handlers.cmd_peers,
+        "engine": handlers.cmd_engine,
         "audit": handlers.cmd_audit,
         "trace": handlers.cmd_trace,
         "brief": handlers.cmd_brief,
