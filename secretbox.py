@@ -43,7 +43,17 @@ SLOTS = {
         "path": ALFRED / ".env",
         "key": "SUPABASE_ACCESS_TOKEN",
         "prefix": "sbp_",
-        "verify": ["bash", "-lc", "supabase login --token \"$SECRET\" >/dev/null 2>&1 && supabase projects list >/dev/null 2>&1"],
+        # The API directly, not the CLI. `supabase login --token` accepted the
+        # value and then `projects list` answered Unauthorized, because the CLI
+        # reads its own credential store rather than what was just handed to it
+        # — so a perfectly good token was rejected and never written. Worse, the
+        # login half MUTATED the machine's stored credentials as a side effect
+        # of checking a candidate. A verifier must not change state.
+        "verify": ["bash", "-lc",
+                   "code=$(curl -s -o /dev/null -w '%{http_code}' "
+                   "-H \"Authorization: Bearer $SECRET\" "
+                   "https://api.supabase.com/v1/projects); "
+                   "[ \"$code\" = 200 ] || { echo \"HTTP $code from api.supabase.com\"; exit 1; }"],
         "note": "גישה מלאה לכל הפרויקטים, כולל TLV-quest בפרודקשן",
     },
     "herenow": {
@@ -358,8 +368,14 @@ def verify(slot: dict, value: str) -> tuple[bool, str]:
            "PATH": os.environ.get("PATH", "") + ":/home/ubuntu/.local/bin"}
     try:
         r = subprocess.run(cmd, env=env, capture_output=True, timeout=45)
-        return (r.returncode == 0,
-                "אומת מול השירות" if r.returncode == 0 else "השירות דחה את הסוד")
+        if r.returncode == 0:
+            return True, "אומת מול השירות"
+        # Say WHY. "the service rejected it" sent us hunting a broken verifier
+        # when the real answer was in the response, and it gives no way to tell
+        # a dead credential from a wrong endpoint or a typo in the paste.
+        out = ((r.stderr or b"") + b" " + (r.stdout or b"")).decode("utf-8", "replace")
+        detail = " ".join(out.split())[:160]
+        return False, f"השירות דחה את הסוד — {detail}" if detail else "השירות דחה את הסוד"
     except Exception as e:
         return False, f"הבדיקה נכשלה: {type(e).__name__}"
 
