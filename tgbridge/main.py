@@ -150,7 +150,11 @@ async def post_init(app):
             f"🎩 Alfred online · agent {m.active} · "
             f"cwd {s.cfg.workdir} · model {s.model or 'default'}\n"
             "Type to chat · /panel for controls · ✨ Features for the rest.",
-            reply_markup=handlers.panel_kb(s))
+            reply_markup=handlers.quick_kb())
+        # The panel goes in a second message: a reply keyboard and an inline
+        # keyboard cannot ride on the same one, and the persistent bar is the
+        # thing that has to survive — it is what stays under the composer.
+        await app.bot.send_message(CHAT_ID, "controls:", reply_markup=handlers.panel_kb(s))
     except Exception:
         log.exception("online message failed")
     # a deliberate restart (restart.ps1) leaves this flag; a crash-respawn does
