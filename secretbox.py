@@ -98,7 +98,8 @@ SLOTS = {
         "key": "BRIDGE_BOT_TOKEN",
         "prefix": None,
         "verify": ["bash", "-lc", "curl -sSf https://api.telegram.org/bot$SECRET/getMe >/dev/null"],
-        "note": "אחרי שמירה צריך להפעיל מחדש את הגשר",
+        "note": "הגשר יופעל מחדש אוטומטית אחרי שמירה",
+        "restart": "alfred.service",
     },
     "opsbot": {
         "label": "טוקן הבוט של AlfredOps",
@@ -107,7 +108,8 @@ SLOTS = {
         "key": "OPS_BOT_TOKEN",
         "prefix": None,
         "verify": ["bash", "-lc", "curl -sSf https://api.telegram.org/bot$SECRET/getMe >/dev/null"],
-        "note": "התראות תפעול בלבד",
+        "note": "התראות תפעול בלבד · הגשר יופעל מחדש אוטומטית",
+        "restart": "alfred.service",
     },
 }
 
@@ -324,6 +326,28 @@ def write_secret(slot: dict, value: str) -> None:
     except Exception:
         os.unlink(tmp)
         raise
+
+
+def restart_after(slot: dict) -> str:
+    """Restart the service that only reads this value at startup.
+
+    Without this, replacing the bot token is a trap: revoking it in BotFather
+    kills the bridge instantly, so the moment you have the new value you have
+    also lost the channel for asking anyone to load it. Secretbox is reachable
+    over the tailnet with no dependency on Telegram or on the bridge process,
+    which makes it the one place that can close the loop by itself.
+    """
+    unit = slot.get("restart")
+    if not unit:
+        return ""
+    try:
+        r = subprocess.run(["sudo", "-n", "systemctl", "restart", unit],
+                           capture_output=True, timeout=90)
+        if r.returncode == 0:
+            return f" · {unit} הופעל מחדש"
+        return f" · ההפעלה מחדש של {unit} נכשלה — הרץ ידנית"
+    except Exception:
+        return f" · לא הצלחתי להפעיל מחדש את {unit} — הרץ ידנית"
 
 
 def verify(slot: dict, value: str) -> tuple[bool, str]:
@@ -609,7 +633,8 @@ border-top:1px solid var(--grid)">סוד חדש</h2>
                            capture_output=True, timeout=25)
         except Exception:
             pass
-        self._render(f"✅ {esc(slot['label'])} נשמר ואומת.<br><span class='fp'>{fp}</span>")
+        note = restart_after(slot)
+        self._render(f"✅ {esc(slot['label'])} נשמר ואומת{esc(note)}.<br><span class='fp'>{fp}</span>")
 
 
 # Secrets that cannot be pasted — they are issued by an interactive device flow
