@@ -94,26 +94,44 @@ def quick_kb() -> ReplyKeyboardMarkup:
         input_field_placeholder="Type to chat…")
 
 
+def _drop_quickbar(rows: list[list[InlineKeyboardButton]]) -> list[list[InlineKeyboardButton]]:
+    """Remove anything the persistent reply keyboard already offers.
+
+    The panel had grown to repeat five of the six quick-bar buttons, so half of
+    it was a second copy of what sits under the text field at all times. Derived
+    from QUICK_BAR rather than deleted by hand, so adding a quick-bar button
+    later cannot silently reintroduce the duplication.
+    """
+    out = []
+    for row in rows:
+        kept = [b for b in row if b.text not in QUICK_BAR]
+        if kept:
+            out.append(kept)
+    return out
+
+
 def panel_kb(s) -> InlineKeyboardMarkup:
     model_label = f"🧠 {s.model or 'default'}"
     auto_label = "🔓 auto-approve" if s.cfg.auto_approve else "🔐 tap-to-approve"
     sec_label = "📋 secretary ●" if s.cfg.secretary else "📋 secretary"
-    return InlineKeyboardMarkup([
+    engine_label = f"🔀 {getattr(s, 'engine', 'claude')}"
+    return InlineKeyboardMarkup(_drop_quickbar([
         [InlineKeyboardButton("⏹ Interrupt", callback_data="act:interrupt"),
          InlineKeyboardButton("♻️ Restart", callback_data="act:restart")],
         [InlineKeyboardButton("🆕 Clear", callback_data="send:/clear"),
          InlineKeyboardButton("🗜 Compact", callback_data="send:/compact"),
          InlineKeyboardButton("📊 Context", callback_data="send:/context")],
         [InlineKeyboardButton(model_label, callback_data="menu:model"),
-         InlineKeyboardButton("🤖 Agents", callback_data="menu:agents"),
-         InlineKeyboardButton("⏰ Jobs", callback_data="menu:jobs")],
+         InlineKeyboardButton(engine_label, callback_data="send:/engine"),
+         InlineKeyboardButton("🤖 Agents", callback_data="menu:agents")],
+        [InlineKeyboardButton("⏰ Jobs", callback_data="menu:jobs"),
+         InlineKeyboardButton("📂 Status", callback_data="act:status")],
         [InlineKeyboardButton(auto_label, callback_data="act:auto"),
          InlineKeyboardButton(sec_label, callback_data="act:secretary")],
         [InlineKeyboardButton("✨ Features", callback_data="menu:features"),
          InlineKeyboardButton("📈 Usage", callback_data="send:/usage"),
-         InlineKeyboardButton("📂 Status", callback_data="act:status")],
-        [InlineKeyboardButton("🎈 Router", callback_data="menu:router")],
-    ])
+         InlineKeyboardButton("🎈 Router", callback_data="menu:router")],
+    ]))
 
 
 def features_kb(s) -> InlineKeyboardMarkup:
