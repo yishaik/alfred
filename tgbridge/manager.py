@@ -762,12 +762,20 @@ class AgentManager:
             return
         src.outbox.emit(f"⚠️ unknown bot destination: {dest}")
 
-    async def on_peer_message(self, peer: str, agent: str, text: str, hop: int):
-        """Inbound from the HTTP peer bus."""
+    async def on_peer_message(self, peer: str, agent: str, text: str, hop: int,
+                              verified: bool = False):
+        """Inbound from the HTTP peer bus.
+
+        `verified` means the sender's identity was derived from a per-peer
+        token rather than taken from the message. When it isn't, the peer name
+        is sender-controlled: rotating it would hand the sender a fresh rate
+        limit bucket every message, so unverified senders all share one bucket.
+        """
+        bucket = f"peer:{peer}" if verified else "peer:<unverified>"
         if hop > MAX_HOPS:
             log.warning("peer msg from %s dropped: hop %d", peer, hop)
             return
-        if not self.pair_limiter.allow((f"peer:{peer}", agent or self.active)):
+        if not self.pair_limiter.allow((bucket, agent or self.active)):
             log.warning("peer msg from %s dropped: pair rate limit", peer)
             return
         target = await self.session_for_agent(

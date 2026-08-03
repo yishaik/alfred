@@ -140,6 +140,7 @@ class Outbox:
         anywhere. Every iteration is therefore wrapped, and a poisonous item is
         dropped (after logging) rather than allowed to kill delivery."""
         pending: list[str] = []
+        consecutive_failures = 0
         while True:
             try:
                 try:
@@ -175,9 +176,29 @@ class Outbox:
                                 log.exception("on_sent callback failed")
             except asyncio.CancelledError:
                 raise
+            except RuntimeError as e:
+                # The loop is gone (interpreter shutdown raced this task): every
+                # further iteration would raise instantly. Without this, one
+                # Ctrl-C wrote 873 identical tracebacks to bridge.log in under a
+                # second (2026-07-31) before the process died. Nothing can be
+                # delivered anymore, so stop instead of spinning.
+                if "event loop is closed" in str(e).lower() or \
+                        "no running event loop" in str(e).lower():
+                    log.warning("outbox: event loop gone — sender stopping")
+                    return
+                log.exception("outbox item failed — dropping it, loop continues")
+                pending.clear()
+                consecutive_failures += 1
             except Exception:
                 log.exception("outbox item failed — dropping it, loop continues")
                 pending.clear()
+                consecutive_failures += 1
+            else:
+                consecutive_failures = 0
+            # Backstop: any *other* error that repeats every iteration must not
+            # become a hot loop that floods the log and pins a core.
+            if consecutive_failures > 3:
+                await asyncio.sleep(min(0.5 * consecutive_failures, 10.0))
 
     async def _flush(self, pending: list[str]):
         if not pending:

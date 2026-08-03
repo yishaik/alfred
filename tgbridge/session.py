@@ -7,7 +7,7 @@ Outputs:  Streamed replies via the outbox, tool traces, cost records, permission
 Key fns:  AgentSession.start/stop/restart/feed/collect, _send_turn, _consume, _crash_restart.
 Deps:     claude_agent_sdk, outbox, guards, bridgetools, mood, soul, ratelimit, fmt.
 Note:     stderr_gist() carries the subprocess's last words into every failure message.
-Updated:  2026-07-31
+Updated:  2026-08-02
 
 Reliability rules baked in:
   * queued user turns survive crashes/restarts (re-fed, never silently dropped)
@@ -34,7 +34,7 @@ from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
                       ReactionTypeEmoji)
 from telegram.constants import ChatAction
 
-from . import bridgetools, guards, markers, router, voice
+from . import bridgetools, codex_engine, guards, markers, router, voice
 import os
 
 from . import metrics
@@ -244,6 +244,9 @@ class AgentSession:
         # a per-turn flag set when a check-in chose silence (suppress output).
         self.last_activity = time.monotonic()
         self.proactive_armed = True
+        # Which backend answers this agent's turns. Per-session so one
+        # agent can be on Codex while the others stay on Claude.
+        self.engine = os.environ.get("BRIDGE_ENGINE", "claude").strip().lower()
         self._proactive_silent = False
         # undo / context / tasks / telegram-native state
         self.turn_user_uuid: str | None = None
@@ -268,6 +271,8 @@ class AgentSession:
         self._last_applied_model: str = ""
         self._turn_user_text: str = ""     # raw user text of the in-flight turn
         self._turn_final_text: str = ""     # last assistant text of that turn
+        self._turn_input_text: str = ""     # clean prompt for engine failover
+        self._claude_limit_status: str = "allowed"
         # one-shot external-model pin set by the /models picker: the NEXT user
         # message is answered by this external (paid, opt-in) provider, then the
         # pin clears. "" = no pin. Explicit prefixes (!gpt/!glm) bypass this.
@@ -311,6 +316,11 @@ class AgentSession:
             prompt += f"\n\n{mem_block}"
         if self.cfg.secretary:
             prompt += SECRETARY_PROMPT
+        # Build the server first: ALLOWED is derived from the tool objects, so
+        # reading it before they exist yields an empty allow-list and every
+        # bridge tool is silently forbidden — which looks like the model
+        # refusing to use them rather than a permissions bug.
+        bridge_server = bridgetools.build_bridge_server(self)
         return ClaudeAgentOptions(
             system_prompt={"type": "preset", "preset": "claude_code",
                            "append": prompt},
@@ -318,7 +328,7 @@ class AgentSession:
             include_partial_messages=True,
             permission_mode="bypassPermissions" if self.cfg.auto_approve else None,
             allowed_tools=list(SAFE_TOOLS) + list(bridgetools.ALLOWED),
-            mcp_servers={bridgetools.SERVER_NAME: bridgetools.build_bridge_server(self)},
+            mcp_servers={bridgetools.SERVER_NAME: bridge_server},
             hooks=guards.build_hooks(self),
             enable_file_checkpointing=True,
             extra_args={"replay-user-messages": None},
@@ -533,6 +543,31 @@ class AgentSession:
             # the user is back — reset the idle clock and re-arm proactive
             self.last_activity = time.monotonic()
             self.proactive_armed = True
+
+        # --- alternative backend. Hangs off the same seam the model router
+        # already uses: handled here and returned, so the Claude client is
+        # never started and nothing downstream changes. Failure falls back to
+        # Claude rather than losing the turn.
+        if getattr(self, "engine", "claude") == "codex":
+            try:
+                if echo:
+                    self.outbox.emit(f"▶️ {text}")
+                self.outbox.start()
+                reply, usage = await codex_engine.run_turn(
+                    self.cfg.name, text, self.cfg.workdir)
+                self.outbox.emit(reply)
+                log.info("codex turn for %s: %s in / %s out", self.cfg.name,
+                         usage.get("input_tokens"), usage.get("output_tokens"))
+                self.outbox.stop()
+                return True
+            except Exception as e:
+                log.warning("codex turn failed, falling back to Claude: %s", e)
+                if codex_engine.is_usage_exhausted(e):
+                    self.engine = "claude"
+                    self.outbox.emit("🔀 Codex usage is exhausted — switching "
+                                     "automatically to Claude")
+                else:
+                    self.outbox.emit(f"⚠️ codex failed ({e}) — this turn goes to Claude")
             # --- model router (fail-safe): scheduler/peer/bot turns never routed.
             # ANY error here → log + fall through to the Claude session as today.
             try:
@@ -629,6 +664,42 @@ class AgentSession:
         self.free_history.append((q, a))
         return None
 
+    async def _failover_to_codex(self) -> bool:
+        """Replay the current rejected Claude turn through Codex.
+
+        Returns False when Codex is unavailable/fails, allowing the normal
+        Claude error result to be shown. A successful replay also makes Codex
+        the live session engine so later turns do not repeatedly hit Claude's
+        exhausted allowance.
+        """
+        prompt = self._turn_input_text
+        ok, why = codex_engine.available()
+        if not prompt or not ok:
+            log.warning("Claude usage exhausted but Codex failover unavailable: %s", why)
+            return False
+        try:
+            reply, usage = await codex_engine.run_turn(
+                self.cfg.name, prompt, self.cfg.workdir)
+        except Exception as e:
+            log.warning("Claude usage exhausted; Codex failover failed: %s", e)
+            return False
+
+        self.engine = "codex"
+        log.info("automatic Claude -> Codex failover for %s: %s in / %s out",
+                 self.cfg.name, usage.get("input_tokens"),
+                 usage.get("output_tokens"))
+        if self._capture is not None:
+            fut = self._capture["future"]
+            if not fut.done():
+                fut.set_result(reply)
+            self._capture = None
+        else:
+            self.outbox.emit("🔀 Claude usage is exhausted — switched "
+                             "automatically to Codex")
+            self.outbox.emit(reply)
+        self._react("👍")
+        return True
+
     async def collect(self, text: str, timeout: float = 300.0) -> str:
         """Run ONE turn and return its final assistant text, with the normal
         chat output suppressed. The engine behind /branch and /merge: fan a
@@ -672,6 +743,7 @@ class AgentSession:
         self.turn_user_uuid = None
         self.turn_files_touched = False
         self._turn_had_tools = False
+        self._turn_input_text = text
         # router: remember the clean user text (no mood/FYI wrappers) so the
         # free model gets real Claude-turn context; reset the final-text buffer.
         if source.kind == "user":
@@ -927,6 +999,17 @@ class AgentSession:
         if isinstance(msg, ResultMessage):
             self.busy = False
             self.backoff.reset()
+            exhausted = (msg.is_error and (
+                self._claude_limit_status == "rejected"
+                or codex_engine.is_usage_exhausted(msg.result)
+                or codex_engine.is_usage_exhausted(msg.subtype)))
+            if exhausted and await self._failover_to_codex():
+                self.mgr.add_cost(msg.total_cost_usd or 0.0)
+                self._turn_user_text = ""
+                self._turn_final_text = ""
+                self._turn_input_text = ""
+                await self._drain()
+                return
             self.mood.note_result(bool(msg.is_error))   # update emotional weather
             # capture mode (branch/merge): hand the gathered text to collect()
             if self._capture is not None:
@@ -1009,12 +1092,22 @@ class AgentSession:
 
         if isinstance(msg, RateLimitEvent):
             info = msg.rate_limit_info
+            self._claude_limit_status = info.status or "allowed"
             if info.status and info.status != "allowed":
                 now = time.monotonic()
                 if now - self._last_rl_note > 300:
                     self._last_rl_note = now
                     self.outbox.emit(f"🚦 API rate limit: {info.status}"
                                      + (f" (resets {info.resets_at})" if info.resets_at else ""))
+                # When no turn is in flight there is nothing to replay. Move the
+                # next turn immediately; an in-flight rejected turn is replayed
+                # when its ResultMessage arrives, avoiding duplicate answers.
+                if info.status == "rejected" and not self.busy:
+                    ok, _ = codex_engine.available()
+                    if ok and self.engine != "codex":
+                        self.engine = "codex"
+                        self.outbox.emit("🔀 Claude usage is exhausted — next "
+                                         "turn will use Codex automatically")
             return
 
     # -- helpers ----------------------------------------------------------------#

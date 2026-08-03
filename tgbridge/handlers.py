@@ -14,7 +14,8 @@ import logging
 import re
 from collections import deque
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
+                      ReplyKeyboardMarkup, ReplyKeyboardRemove, Update)
 from telegram.ext import ContextTypes
 
 from . import metrics, router, voice
@@ -62,26 +63,75 @@ async def _session(update: Update, ctx):
 # --------------------------------------------------------------------------- #
 # Keyboards
 # --------------------------------------------------------------------------- #
+# The bar that stays under the composer. A reply-keyboard button cannot carry
+# callback_data — tapping it just sends its label as text — so only actions that
+# ARE a command can live here. Anything with state or a submenu (model, agents,
+# router, the toggles) has to stay inline in /panel.
+#
+# Labels are mapped back to commands rather than being literal "/clear" text,
+# because the bar is visible all the time and should not read like a cheat
+# sheet. on_text intercepts them before the agent ever sees them.
+# Two kinds, and the difference matters: "act" is a bridge command handled
+# here, "send" is a Claude Code slash command that has to reach the agent as
+# text. /clear and /compact belong to the agent, not to us — dispatching them
+# as bridge commands finds no handler at all.
+QUICK_BAR = {
+    "⏹ Interrupt": ("act", "interrupt"),
+    "🆕 Clear": ("send", "/clear"),
+    "🗜 Compact": ("send", "/compact"),
+    "📊 Context": ("send", "/context"),
+    "📈 Usage": ("send", "/usage"),
+    "🎛 Panel": ("act", "panel"),
+}
+
+
+def quick_kb() -> ReplyKeyboardMarkup:
+    """Persistent, so it survives sending a message and a bridge restart."""
+    labels = list(QUICK_BAR)
+    return ReplyKeyboardMarkup(
+        [labels[:3], labels[3:]],
+        resize_keyboard=True, is_persistent=True,
+        input_field_placeholder="Type to chat…")
+
+
+def _drop_quickbar(rows: list[list[InlineKeyboardButton]]) -> list[list[InlineKeyboardButton]]:
+    """Remove anything the persistent reply keyboard already offers.
+
+    The panel had grown to repeat five of the six quick-bar buttons, so half of
+    it was a second copy of what sits under the text field at all times. Derived
+    from QUICK_BAR rather than deleted by hand, so adding a quick-bar button
+    later cannot silently reintroduce the duplication.
+    """
+    out = []
+    for row in rows:
+        kept = [b for b in row if b.text not in QUICK_BAR]
+        if kept:
+            out.append(kept)
+    return out
+
+
 def panel_kb(s) -> InlineKeyboardMarkup:
     model_label = f"🧠 {s.model or 'default'}"
     auto_label = "🔓 auto-approve" if s.cfg.auto_approve else "🔐 tap-to-approve"
     sec_label = "📋 secretary ●" if s.cfg.secretary else "📋 secretary"
-    return InlineKeyboardMarkup([
+    engine_label = f"🔀 {getattr(s, 'engine', 'claude')}"
+    return InlineKeyboardMarkup(_drop_quickbar([
         [InlineKeyboardButton("⏹ Interrupt", callback_data="act:interrupt"),
          InlineKeyboardButton("♻️ Restart", callback_data="act:restart")],
         [InlineKeyboardButton("🆕 Clear", callback_data="send:/clear"),
          InlineKeyboardButton("🗜 Compact", callback_data="send:/compact"),
          InlineKeyboardButton("📊 Context", callback_data="send:/context")],
         [InlineKeyboardButton(model_label, callback_data="menu:model"),
-         InlineKeyboardButton("🤖 Agents", callback_data="menu:agents"),
-         InlineKeyboardButton("⏰ Jobs", callback_data="menu:jobs")],
+         InlineKeyboardButton(engine_label, callback_data="send:/engine"),
+         InlineKeyboardButton("🤖 Agents", callback_data="menu:agents")],
+        [InlineKeyboardButton("⏰ Jobs", callback_data="menu:jobs"),
+         InlineKeyboardButton("📂 Status", callback_data="act:status")],
         [InlineKeyboardButton(auto_label, callback_data="act:auto"),
          InlineKeyboardButton(sec_label, callback_data="act:secretary")],
         [InlineKeyboardButton("✨ Features", callback_data="menu:features"),
          InlineKeyboardButton("📈 Usage", callback_data="send:/usage"),
-         InlineKeyboardButton("📂 Status", callback_data="act:status")],
-        [InlineKeyboardButton("🎈 Router", callback_data="menu:router")],
-    ])
+         InlineKeyboardButton("🎈 Router", callback_data="menu:router")],
+    ]))
 
 
 def features_kb(s) -> InlineKeyboardMarkup:
@@ -260,6 +310,50 @@ async def cmd_start(update: Update, ctx):
         "👤 סוכן: /auto /secretary /cwd /bind /fork /sessions\n\n"
         "💡 הגב 👎 כדי לעצור · ערוך הודעה כדי לתקן אותה.",
         reply_markup=panel_kb(s))
+
+
+async def cmd_brainbot(update: Update, ctx):
+    """Show Telegram's native one-tap Managed Bot creation button."""
+    from .managed_bots import needs_creation, request_keyboard
+    if not needs_creation():
+        await update.message.reply_text("🧠 בוט ה־Second Brain כבר הוגדר.")
+        return
+    await update.message.reply_text(
+        "לחץ על הכפתור — Telegram ייצור ויחבר את הבוט אוטומטית:",
+        reply_markup=request_keyboard())
+
+
+async def on_managed_bot_created(update: Update, ctx):
+    """Provision the freshly-created bot without exposing its token.
+
+    Telegram only offers request_managed_bot as a REPLY-keyboard button — there
+    is no inline equivalent — so the bar has to be swapped out for the duration
+    and put back afterwards, rather than the flow being inline as one would
+    prefer.
+    """
+    from .managed_bots import provision
+    created = update.message.managed_bot_created
+    if not created or not created.bot:
+        return
+    await update.message.reply_text("🧠 מגדיר את הבוט ומחבר אותו ל־Second Brain…")
+    try:
+        await provision(ctx.bot, created.bot.id)
+    except Exception:
+        log.exception("managed Second Brain bot provisioning failed")
+        await update.message.reply_text(
+            "⚠️ הבוט נוצר, אבל ההפעלה נכשלה. לא נחשף שום טוקן; בדוק /logs.",
+            reply_markup=quick_kb())
+        return
+    username = created.bot.username
+    kb = (InlineKeyboardMarkup([[InlineKeyboardButton(
+        "פתח את Second Brain 🧠", url=f"https://t.me/{username}")]])
+          if username else None)
+    await update.message.reply_text(
+        "✅ מוכן. הבוט מחפש ומסביר, קולט לינקים דרך X Reader, מטמיע אותם "
+        "ומעדכן את אתר here.now.", reply_markup=kb)
+    # one_time_keyboard hides the request button but does NOT bring back what
+    # it replaced, so the composer would be left bare. Put the bar back.
+    await update.message.reply_text("↩️", reply_markup=quick_kb())
 
 
 async def cmd_panel(update: Update, ctx):
@@ -856,6 +950,52 @@ async def cmd_peers(update: Update, ctx):
     await update.message.reply_text(await m.peers.diagnostics())
 
 
+async def cmd_engine(update: Update, ctx):
+    """Switch this agent between the Claude and Codex subscriptions.
+
+    Per-session on purpose: the point is to move one conversation onto the
+    other plan without disturbing the other agents.
+    """
+    from . import codex_engine
+    s = await _session(update, ctx)
+    arg = " ".join(ctx.args).strip().lower() if ctx.args else ""
+
+    if not arg:
+        ok, mode = codex_engine.available()
+        thread = codex_engine.thread_for(s.cfg.name)
+        await update.message.reply_text(
+            f"🔀 engine: *{getattr(s, 'engine', 'claude')}*\n"
+            f"codex: {'✅ ' + mode if ok else '❌ ' + mode}\n"
+            + (f"codex thread: `{thread[:8]}…`\n" if thread else "")
+            + "\n`/engine claude` · `/engine codex` · `/engine reset` (new codex thread)",
+            parse_mode="Markdown")
+        return
+
+    if arg == "reset":
+        codex_engine.clear_thread(s.cfg.name)
+        await update.message.reply_text("codex thread cleared — next codex turn starts fresh")
+        return
+
+    if arg not in ("claude", "codex"):
+        await update.message.reply_text("usage: /engine [claude|codex|reset]")
+        return
+
+    if arg == "codex":
+        # Check now rather than failing on the next message, when the reason
+        # would be buried in a fallback notice.
+        ok, why = codex_engine.available()
+        if not ok:
+            await update.message.reply_text(f"❌ cannot switch: {why}")
+            return
+
+    s.engine = arg
+    note = ("\n\nNote: the bridge's own tools (files, memory, scheduling, peers) "
+            "and the guard hooks are Claude-side. Codex has its own file and "
+            "shell tools, and answers whole rather than streaming."
+            if arg == "codex" else "")
+    await update.message.reply_text(f"🔀 engine → *{arg}*{note}", parse_mode="Markdown")
+
+
 async def cmd_trace(update: Update, ctx):
     """This session's recent tool-call timeline — duration + ok/error (#19)."""
     from . import tracing
@@ -1278,6 +1418,26 @@ async def cmd_remind(update: Update, ctx):
 # --------------------------------------------------------------------------- #
 # Messages
 # --------------------------------------------------------------------------- #
+async def _run_quick(update: Update, ctx, entry) -> None:
+    """Dispatch a quick-bar tap: bridge command, or straight to the agent.
+
+    Bridge handlers are resolved by name in this module rather than through the
+    registry in main.py, so a label pointing at something that does not exist
+    says so instead of being forwarded to the agent as a stray line of text.
+    """
+    kind, target = entry
+    if kind == "send":
+        s = await _session(update, ctx)
+        await s.feed(target, echo=True)
+        return
+    fn = globals().get(f"cmd_{target}")
+    if not fn:
+        await update.message.reply_text(f"⚠️ quick bar points at unknown command /{target}")
+        return
+    ctx.args = []
+    await fn(update, ctx)
+
+
 async def on_text(update: Update, ctx):
     msg = update.message
     # anti-loop: never react to a bot-authored message; drop re-delivered ids.
@@ -1289,6 +1449,11 @@ async def on_text(update: Update, ctx):
     _SEEN_MSGS.append(key)
     s = await _session(update, ctx)
     text = msg.text
+    # A quick-bar tap arrives as ordinary text. Turn it back into the command it
+    # stands for, before it is treated as something to say to the agent.
+    if text in QUICK_BAR:
+        await _run_quick(update, ctx, QUICK_BAR[text])
+        return
     # Resolve a pending "Other / type your answer" question without re-feeding Claude
     for qid, st in list(s.questions.items()):
         if st.get("waiting_text") and not st["future"].done():

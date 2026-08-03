@@ -35,12 +35,20 @@ log = logging.getLogger("bridge.tools")
 XREADER_DIR = os.environ.get("BRIDGE_XREADER_DIR", str(Path(WORKDIR) / "x-reader"))
 
 SERVER_NAME = "bridge"
-TOOL_NAMES = ["send_file", "send_buttons", "message_agent",
-              "schedule", "unschedule", "list_jobs",
-              "remember", "forget", "recall", "kb_read",
-              "fetch_content", "route_model"]
-# fully-qualified names for allowed_tools
-ALLOWED = [f"mcp__{SERVER_NAME}__{t}" for t in TOOL_NAMES]
+
+# Derived from the tools themselves, not typed out again. Keeping a parallel
+# list by hand meant adding a tool took an edit in three places, and forgetting
+# one of them produced a tool that existed but was never permitted — a failure
+# that looks like the model refusing to use it. build_tools() fills this in on
+# first call; the module-level default keeps import-time consumers working.
+TOOL_NAMES: list[str] = []
+ALLOWED: list[str] = []
+
+
+def _refresh_names(tools) -> None:
+    global TOOL_NAMES, ALLOWED
+    TOOL_NAMES = [t.name for t in tools]
+    ALLOWED = [f"mcp__{SERVER_NAME}__{t.name}" for t in tools]
 
 
 def _text(msg: str, err: bool = False) -> dict:
@@ -71,8 +79,14 @@ async def _run_node(script: str, *script_args: str, timeout: float = 90.0) -> tu
     return ((out or b"").decode("utf-8", "replace").strip(), proc.returncode or 0)
 
 
-def build_bridge_server(session):
-    """Create the per-session MCP server config for ClaudeAgentOptions."""
+def build_tools(session):
+    """Every bridge tool, as SdkMcpTool objects bound to this session.
+
+    The single source of truth. Claude gets these wrapped in an in-process SDK
+    server; every other engine gets them over stdio through mcp_shim.py, which
+    reads this same list. A tool added here appears in both without any further
+    work — which is the point.
+    """
     mgr = session.mgr
 
     @tool("send_file", "Send a file from disk to the user via Telegram. "
@@ -243,6 +257,51 @@ def build_bridge_server(session):
         out, rc = await _run_node("fetch.mjs", url, "--save", timeout=120.0)
         return _text(out[:6000] or "(no content)", err=(rc != 0))
 
+    @tool("brain_search", "Search the local Second Brain wiki and return the "
+          "best matching pages and snippets.", {"query": str})
+    async def brain_search(args):
+        query = str(args.get("query", "")).strip()
+        if not query:
+            return _text("query is required", err=True)
+        script = str(Path(WORKDIR) / "second-brain" / "brain.mjs")
+        out, rc = await _run_node(script, "search", query, "-n", "8")
+        return _text(out[:10000] or "(no matches)", err=(rc != 0))
+
+    @tool("brain_read", "Read a complete Second Brain wiki page by name or "
+          "path.", {"page": str})
+    async def brain_read(args):
+        page = str(args.get("page", "")).strip()
+        if not page:
+            return _text("page is required", err=True)
+        script = str(Path(WORKDIR) / "second-brain" / "brain.mjs")
+        out, rc = await _run_node(script, "read", page)
+        return _text(out[:20000] or "(empty page)", err=(rc != 0))
+
+    @tool("ingest_second_brain", "Start the ingestion pipeline after new links "
+          "were saved by fetch_content.", {})
+    async def ingest_second_brain(args):
+        proc = await asyncio.create_subprocess_exec(
+            "sudo", "-n", "systemctl", "start", "second-brain-ingest.service",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        out, _ = await proc.communicate()
+        return _text("Second Brain ingestion started" if not proc.returncode else
+                     (out or b"").decode("utf-8", "replace")[:2000],
+                     err=bool(proc.returncode))
+
+    @tool("publish_second_brain_site", "Build, validate and publish the current "
+          "Second Brain wiki to its existing here.now URL.", {})
+    async def publish_second_brain_site(args):
+        script = str(Path(WORKDIR) / "wiki-site" / "update-site.sh")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                script, "--force", stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT)
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=1800)
+        except (OSError, asyncio.TimeoutError) as e:
+            return _text(f"site update failed: {e}", err=True)
+        return _text((out or b"").decode("utf-8", "replace")[-6000:] or
+                     "site updated", err=bool(proc.returncode))
+
     @tool("route_model", "Ask the local Gemma model-router which AI model best fits "
           "a task (gemini=content/visuals, claude-code=code, claude=logic/analysis, "
           "gpt=images/personal, grok=facts/current-events). Returns the recommended "
@@ -255,9 +314,17 @@ def build_bridge_server(session):
         out, rc = await _run_node("route.mjs", task, timeout=180.0)
         return _text(out or "(no result)", err=(rc != 0))
 
+
+    tools = [send_file, send_buttons, message_agent,
+             schedule, unschedule, list_jobs,
+             remember, forget, recall, kb_read,
+             fetch_content, brain_search, brain_read,
+             ingest_second_brain, publish_second_brain_site, route_model]
+    _refresh_names(tools)
+    return tools
+
+
+def build_bridge_server(session):
+    """The in-process MCP server Claude's SDK expects, over the shared tools."""
     return create_sdk_mcp_server(
-        name=SERVER_NAME, version="1.0.0",
-        tools=[send_file, send_buttons, message_agent,
-               schedule, unschedule, list_jobs,
-               remember, forget, recall, kb_read,
-               fetch_content, route_model])
+        name=SERVER_NAME, version="1.0.0", tools=build_tools(session))

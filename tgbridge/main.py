@@ -11,6 +11,7 @@ Updated:  2026-07-12
 
 import asyncio
 import logging
+import time
 from logging.handlers import RotatingFileHandler
 
 from telegram import Update
@@ -24,6 +25,7 @@ from .config import (APP_LOG_FILE, BOT_TOKEN, CHAT_ID, GROUP_ID, INBOX,
                      system_drive_free_gb)
 from .manager import AgentManager
 from .peers import PeerBus
+from .toolrpc import ToolRPC
 from .scheduler import Scheduler
 
 log = logging.getLogger("bridge")
@@ -34,6 +36,7 @@ log = logging.getLogger("bridge")
 # under Telegram's 100-command cap, each description short.
 BOT_COMMANDS = [
     ("panel", "לוח בקרה"),
+    ("brainbot", "יצירת בוט Second Brain"),
     ("status", "מצב"),
     ("version", "איזה קוד רץ"),
     ("backup", "גיבוי מיידי + מראה offsite"),
@@ -109,6 +112,14 @@ async def post_init(app):
     m.scheduler.start()
     m.peers = PeerBus(m)
     await m.peers.start()
+    # Bridge tools, reachable from outside this process. Only engines that are
+    # not Claude need it, but it costs a loopback listener and starting it
+    # unconditionally means switching engines never requires a restart.
+    m.toolrpc = ToolRPC(m)
+    try:
+        await m.toolrpc.start()
+    except Exception as e:
+        log.warning("tool RPC did not start (non-Claude engines lose bridge tools): %s", e)
     m.start_health_loop()
     m.start_proactive_loop()
     m.start_digest_loop()
@@ -119,6 +130,15 @@ async def post_init(app):
         await app.bot.set_my_commands(BOT_COMMANDS)
     except Exception as e:
         log.warning("set_my_commands failed: %s", e)   # never block startup
+    from .managed_bots import needs_creation, request_keyboard
+    if needs_creation():
+        try:
+            await app.bot.send_message(
+                CHAT_ID,
+                "🧠 מוכן ליצור את בוט ה־Second Brain. צריך רק ללחוץ:",
+                reply_markup=request_keyboard())
+        except Exception:
+            log.exception("managed-bot creation button failed")
     try:
         INBOX.mkdir(parents=True, exist_ok=True)
     except Exception:
@@ -130,7 +150,11 @@ async def post_init(app):
             f"🎩 Alfred online · agent {m.active} · "
             f"cwd {s.cfg.workdir} · model {s.model or 'default'}\n"
             "Type to chat · /panel for controls · ✨ Features for the rest.",
-            reply_markup=handlers.panel_kb(s))
+            reply_markup=handlers.quick_kb())
+        # The panel goes in a second message: a reply keyboard and an inline
+        # keyboard cannot ride on the same one, and the persistent bar is the
+        # thing that has to survive — it is what stays under the composer.
+        await app.bot.send_message(CHAT_ID, "controls:", reply_markup=handlers.panel_kb(s))
     except Exception:
         log.exception("online message failed")
     # a deliberate restart (restart.ps1) leaves this flag; a crash-respawn does
@@ -175,6 +199,37 @@ def _disable_wmi_platform_lookup():
         raise OSError("WMI lookup disabled by bridge")
 
     platform._wmi_query = _no_wmi
+
+
+def _await_dns(host: str = "api.telegram.org", budget: float = 900.0) -> bool:
+    """Block until `host` resolves, or the budget runs out.
+
+    A cold boot brings the bridge up before the resolver is usable (Oracle's
+    VCN nameserver at 169.254.169.254 is the only one DHCP hands out). PTB's
+    initialize() calls get_me() straight away, so an unresolvable host used to
+    kill the process in ~1s; the supervisor then climbed its backoff ladder to
+    the 300s rung and Alfred sat offline for 47 minutes on 2026-08-01 even
+    though DNS had come back long before. Waiting in-process instead means we
+    reconnect within seconds of the resolver working, and a genuinely broken
+    network still exits (non-zero) once the budget is spent."""
+    import socket
+    delay, waited, complained = 2.0, 0.0, False
+    while True:
+        try:
+            socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+            if complained:
+                log.warning("DNS recovered after %.0fs — starting poller", waited)
+            return True
+        except socket.gaierror as e:
+            if waited >= budget:
+                log.error("no DNS for %s after %.0fs (%s) — giving up", host, waited, e)
+                return False
+            if not complained:
+                log.warning("%s does not resolve yet (%s) — waiting for DNS", host, e)
+                complained = True
+            time.sleep(delay)
+            waited += delay
+            delay = min(delay * 2, 30.0)
 
 
 _lock_sock = None
@@ -226,6 +281,7 @@ def main():
 
     cmds = {
         "start": handlers.cmd_start,
+        "brainbot": handlers.cmd_brainbot,
         "panel": handlers.cmd_panel, "menu": handlers.cmd_panel,
         "status": handlers.cmd_status,
         "version": handlers.cmd_version,
@@ -269,6 +325,7 @@ def main():
         "watch": handlers.cmd_watch,
         "unwatch": handlers.cmd_unwatch,
         "peers": handlers.cmd_peers,
+        "engine": handlers.cmd_engine,
         "audit": handlers.cmd_audit,
         "trace": handlers.cmd_trace,
         "brief": handlers.cmd_brief,
@@ -289,6 +346,9 @@ def main():
         auth & (filters.VOICE | filters.AUDIO), handlers.on_voice))
     app.add_handler(MessageHandler(auth & filters.LOCATION, handlers.on_location))
     app.add_handler(MessageHandler(
+        auth & filters.StatusUpdate.MANAGED_BOT_CREATED,
+        handlers.on_managed_bot_created))
+    app.add_handler(MessageHandler(
         auth & (filters.PHOTO | filters.Document.ALL | filters.VIDEO),
         handlers.on_media))
     app.add_handler(MessageHandler(auth & filters.TEXT, handlers.on_text))
@@ -296,6 +356,8 @@ def main():
     app.add_error_handler(handlers.on_error)
 
     print(f"[bridge] starting — chat={CHAT_ID} group={GROUP_ID or '-'}")
+    if not _await_dns():
+        raise SystemExit(1)
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
     # run_polling returns on a clean shutdown. handlers.exit_code is non-zero
     # only when a handler asked to stay down for a while (sustained getUpdates

@@ -1,0 +1,17 @@
+[Unit]
+Description=Alfred dedicated Second Brain Telegram bot
+After=network-online.target nss-lookup.target systemd-resolved.service
+Wants=network-online.target
+ConditionPathExists=/home/ubuntu/alfred/.env-secondbrain
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/alfred
+Environment=BRIDGE_ENV_FILE=/home/ubuntu/alfred/.env-secondbrain
+ExecStart=/home/ubuntu/alfred/.venv/bin/python -u /home/ubuntu/alfred/supervisor.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
