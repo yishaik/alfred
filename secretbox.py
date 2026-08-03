@@ -49,11 +49,22 @@ SLOTS = {
         # — so a perfectly good token was rejected and never written. Worse, the
         # login half MUTATED the machine's stored credentials as a side effect
         # of checking a candidate. A verifier must not change state.
-        "verify": ["bash", "-lc",
-                   "code=$(curl -s -o /dev/null -w '%{http_code}' "
-                   "-H \"Authorization: Bearer $SECRET\" "
-                   "https://api.supabase.com/v1/projects); "
-                   "[ \"$code\" = 200 ] || { echo \"HTTP $code from api.supabase.com\"; exit 1; }"],
+        # Several endpoints, because /v1/projects is on its way out — the CLI
+        # names its failure LegacyProjectsListUnexpectedStatusError — and a
+        # verifier pinned to a deprecated route rejects perfectly good new
+        # tokens. Any one of these answering 200 proves the token works; the
+        # failure message lists what each said, so the next change is informed
+        # rather than guessed.
+        "verify": ["bash", "-lc", """
+for ep in organizations projects profile; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+    -H "Authorization: Bearer $SECRET" -A 'curl/8.5.0' \
+    "https://api.supabase.com/v1/$ep")
+  [ "$code" = 200 ] && exit 0
+  msg="$msg $ep=$code"
+done
+echo "no endpoint accepted it:$msg"; exit 1
+"""],
         "note": "גישה מלאה לכל הפרויקטים, כולל TLV-quest בפרודקשן",
     },
     "herenow": {
