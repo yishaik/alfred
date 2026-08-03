@@ -95,6 +95,9 @@ Deferred deliberately on 2026-08-01 — the critical read path is covered.
 ---
 
 ## ✅ Done (recent)
+- [x] **Dedicated Second Brain Managed Bot** — one-tap Telegram creation,
+      isolated bridge/state, X Reader capture, brain search/read/ingestion and
+      here.now publishing tools — 2026-08-03
 - [x] **Automatic engine failover on exhausted usage** — a rejected Claude turn
       is replayed through Codex and the live session switches to Codex; Codex
       quota exhaustion replays through Claude and switches back. Narrow matching

@@ -257,6 +257,51 @@ def build_tools(session):
         out, rc = await _run_node("fetch.mjs", url, "--save", timeout=120.0)
         return _text(out[:6000] or "(no content)", err=(rc != 0))
 
+    @tool("brain_search", "Search the local Second Brain wiki and return the "
+          "best matching pages and snippets.", {"query": str})
+    async def brain_search(args):
+        query = str(args.get("query", "")).strip()
+        if not query:
+            return _text("query is required", err=True)
+        script = str(Path(WORKDIR) / "second-brain" / "brain.mjs")
+        out, rc = await _run_node(script, "search", query, "-n", "8")
+        return _text(out[:10000] or "(no matches)", err=(rc != 0))
+
+    @tool("brain_read", "Read a complete Second Brain wiki page by name or "
+          "path.", {"page": str})
+    async def brain_read(args):
+        page = str(args.get("page", "")).strip()
+        if not page:
+            return _text("page is required", err=True)
+        script = str(Path(WORKDIR) / "second-brain" / "brain.mjs")
+        out, rc = await _run_node(script, "read", page)
+        return _text(out[:20000] or "(empty page)", err=(rc != 0))
+
+    @tool("ingest_second_brain", "Start the ingestion pipeline after new links "
+          "were saved by fetch_content.", {})
+    async def ingest_second_brain(args):
+        proc = await asyncio.create_subprocess_exec(
+            "sudo", "-n", "systemctl", "start", "second-brain-ingest.service",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        out, _ = await proc.communicate()
+        return _text("Second Brain ingestion started" if not proc.returncode else
+                     (out or b"").decode("utf-8", "replace")[:2000],
+                     err=bool(proc.returncode))
+
+    @tool("publish_second_brain_site", "Build, validate and publish the current "
+          "Second Brain wiki to its existing here.now URL.", {})
+    async def publish_second_brain_site(args):
+        script = str(Path(WORKDIR) / "wiki-site" / "update-site.sh")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                script, "--force", stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT)
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=1800)
+        except (OSError, asyncio.TimeoutError) as e:
+            return _text(f"site update failed: {e}", err=True)
+        return _text((out or b"").decode("utf-8", "replace")[-6000:] or
+                     "site updated", err=bool(proc.returncode))
+
     @tool("route_model", "Ask the local Gemma model-router which AI model best fits "
           "a task (gemini=content/visuals, claude-code=code, claude=logic/analysis, "
           "gpt=images/personal, grok=facts/current-events). Returns the recommended "
@@ -273,7 +318,8 @@ def build_tools(session):
     tools = [send_file, send_buttons, message_agent,
              schedule, unschedule, list_jobs,
              remember, forget, recall, kb_read,
-             fetch_content, route_model]
+             fetch_content, brain_search, brain_read,
+             ingest_second_brain, publish_second_brain_site, route_model]
     _refresh_names(tools)
     return tools
 

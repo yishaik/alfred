@@ -36,6 +36,7 @@ log = logging.getLogger("bridge")
 # under Telegram's 100-command cap, each description short.
 BOT_COMMANDS = [
     ("panel", "לוח בקרה"),
+    ("brainbot", "יצירת בוט Second Brain"),
     ("status", "מצב"),
     ("version", "איזה קוד רץ"),
     ("backup", "גיבוי מיידי + מראה offsite"),
@@ -129,6 +130,15 @@ async def post_init(app):
         await app.bot.set_my_commands(BOT_COMMANDS)
     except Exception as e:
         log.warning("set_my_commands failed: %s", e)   # never block startup
+    from .managed_bots import needs_creation, request_keyboard
+    if needs_creation():
+        try:
+            await app.bot.send_message(
+                CHAT_ID,
+                "🧠 מוכן ליצור את בוט ה־Second Brain. צריך רק ללחוץ:",
+                reply_markup=request_keyboard())
+        except Exception:
+            log.exception("managed-bot creation button failed")
     try:
         INBOX.mkdir(parents=True, exist_ok=True)
     except Exception:
@@ -267,6 +277,7 @@ def main():
 
     cmds = {
         "start": handlers.cmd_start,
+        "brainbot": handlers.cmd_brainbot,
         "panel": handlers.cmd_panel, "menu": handlers.cmd_panel,
         "status": handlers.cmd_status,
         "version": handlers.cmd_version,
@@ -330,6 +341,9 @@ def main():
     app.add_handler(MessageHandler(
         auth & (filters.VOICE | filters.AUDIO), handlers.on_voice))
     app.add_handler(MessageHandler(auth & filters.LOCATION, handlers.on_location))
+    app.add_handler(MessageHandler(
+        auth & filters.StatusUpdate.MANAGED_BOT_CREATED,
+        handlers.on_managed_bot_created))
     app.add_handler(MessageHandler(
         auth & (filters.PHOTO | filters.Document.ALL | filters.VIDEO),
         handlers.on_media))

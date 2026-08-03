@@ -14,7 +14,8 @@ import logging
 import re
 from collections import deque
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
+                      ReplyKeyboardRemove, Update)
 from telegram.ext import ContextTypes
 
 from . import metrics, router, voice
@@ -260,6 +261,41 @@ async def cmd_start(update: Update, ctx):
         "👤 סוכן: /auto /secretary /cwd /bind /fork /sessions\n\n"
         "💡 הגב 👎 כדי לעצור · ערוך הודעה כדי לתקן אותה.",
         reply_markup=panel_kb(s))
+
+
+async def cmd_brainbot(update: Update, ctx):
+    """Show Telegram's native one-tap Managed Bot creation button."""
+    from .managed_bots import needs_creation, request_keyboard
+    if not needs_creation():
+        await update.message.reply_text("🧠 בוט ה־Second Brain כבר הוגדר.")
+        return
+    await update.message.reply_text(
+        "לחץ על הכפתור — Telegram ייצור ויחבר את הבוט אוטומטית:",
+        reply_markup=request_keyboard())
+
+
+async def on_managed_bot_created(update: Update, ctx):
+    """Provision the freshly-created bot without exposing its token."""
+    from .managed_bots import provision
+    created = update.message.managed_bot_created
+    if not created or not created.bot:
+        return
+    await update.message.reply_text("🧠 מגדיר את הבוט ומחבר אותו ל־Second Brain…")
+    try:
+        await provision(ctx.bot, created.bot.id)
+    except Exception:
+        log.exception("managed Second Brain bot provisioning failed")
+        await update.message.reply_text(
+            "⚠️ הבוט נוצר, אבל ההפעלה נכשלה. לא נחשף שום טוקן; בדוק /logs.",
+            reply_markup=ReplyKeyboardRemove())
+        return
+    username = created.bot.username
+    kb = (InlineKeyboardMarkup([[InlineKeyboardButton(
+        "פתח את Second Brain 🧠", url=f"https://t.me/{username}")]])
+          if username else None)
+    await update.message.reply_text(
+        "✅ מוכן. הבוט מחפש ומסביר, קולט לינקים דרך X Reader, מטמיע אותם "
+        "ומעדכן את אתר here.now.", reply_markup=kb)
 
 
 async def cmd_panel(update: Update, ctx):
