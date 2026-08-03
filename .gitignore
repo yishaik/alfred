@@ -1,5 +1,6 @@
 # Secrets — never commit
 .env
+.secretbox-ingest-token
 
 # Runtime state / logs
 bridge.log

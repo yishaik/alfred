@@ -101,14 +101,26 @@ class PeerBus:
         url = PEERS.get(peer)
         if not url:
             return False
-        try:
-            r = await self._http.post(url + "/msg", json={
-                "token": PEER_TOKEN, "from": f"{PEER_NAME}/{src_agent}",
-                "agent": "", "text": text, "hop": hop})
-            return r.status_code == 200
-        except Exception as e:
-            log.warning("peer send to %s failed: %s", peer, e)
-            return False
+        # 2026-08-04: this used to be a single attempt — a transient network blip (observed:
+        # "Stream closed" on an otherwise-healthy peer) silently dropped the message with only
+        # a log line, no visibility to the user and no chance to recover. Retry a couple of
+        # times with a short backoff before giving up; still returns False (and logs) on a
+        # real, persistent failure so callers/observability are unaffected.
+        last_err = None
+        for attempt in range(3):
+            try:
+                r = await self._http.post(url + "/msg", json={
+                    "token": PEER_TOKEN, "from": f"{PEER_NAME}/{src_agent}",
+                    "agent": "", "text": text, "hop": hop})
+                if r.status_code == 200:
+                    return True
+                last_err = f"HTTP {r.status_code}"
+            except Exception as e:
+                last_err = str(e)
+            if attempt < 2:
+                await asyncio.sleep(1.5 * (attempt + 1))
+        log.warning("peer send to %s failed after 3 attempts: %s", peer, last_err)
+        return False
 
     async def _handle(self, reader: asyncio.StreamReader,
                       writer: asyncio.StreamWriter):
