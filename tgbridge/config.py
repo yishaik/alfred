@@ -139,6 +139,16 @@ for _v in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
 CLAUDE_INIT_TIMEOUT_MS = os.environ.setdefault(
     "CLAUDE_CODE_STREAM_CLOSE_TIMEOUT", "180000")
 
+# The SDK caps ONE stdout NDJSON line at max_buffer_size and turns an overrun
+# into a fatal read error that kills the whole consume loop — not a skipped
+# message. The 1MB default is smaller than a single ordinary tool result: a
+# Read of a ~400KB photo comes back as a base64 image block and blows straight
+# past it, so every image the agent looked at crashed the session mid-turn.
+# Raise it well above any plausible single message; a real runaway is caught by
+# the turn watchdog, not by truncating the stream.
+CLAUDE_MAX_BUFFER_SIZE = int(os.environ.get("BRIDGE_MAX_BUFFER_SIZE",
+                                            str(64 * 1024 * 1024)))
+
 
 def _try_keyring(name: str) -> str:
     try:
@@ -281,6 +291,8 @@ TG_MAX = 4000                 # safe message length (hard limit 4096)
 FILE_THRESHOLD = 3500         # longer replies are sent as a document instead of split spam
 BATCH_WINDOW = 0.35           # seconds to coalesce non-streamed output lines
 PERMISSION_TIMEOUT = 600      # seconds to wait for an approval tap before denying
+QUESTION_TIMEOUT = 12 * 3600  # a question left unanswered this long expires instead
+                              # of blocking every later question indefinitely
 
 INBOX = Path(WORKDIR) / "inbox"
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}

@@ -162,13 +162,53 @@ PROTECTED = {"BRIDGE_CHAT_ID", "BRIDGE_GROUP_ID", "BRIDGE_WORKDIR", "BRIDGE_STAT
 
 
 def load_vault() -> dict:
+    """Read the vault, or fail. An empty dict is returned ONLY for a vault that
+    does not exist yet.
+
+    This used to swallow every exception and return an empty vault. Combined
+    with the read-modify-write in vault_put, that turned an *unreadable* file
+    into a silent total erase: a process that could not read the vault wrote
+    back one containing only its own new entry, and ~230 credentials went in a
+    single call with no error. A permission error must stop the caller, not be
+    mistaken for "there is nothing here yet".
+    """
+    if not VAULT_FILE.exists():
+        return {"version": 1, "projects": {}}
     try:
         return json.loads(VAULT_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {"version": 1, "projects": {}}
+    except OSError as e:
+        raise RuntimeError(
+            f"cannot read {VAULT_FILE}: {e}. Refusing to continue — writing now "
+            f"would replace the vault with whatever this process holds."
+        ) from e
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"{VAULT_FILE} is not valid JSON: {e}. Restore it before writing; "
+            f"a write now would discard every entry it still contains."
+        ) from e
 
 
 def save_vault(d: dict) -> None:
+    # A vault that shrinks is almost always a bug rather than an intention:
+    # entries are removed one at a time, never in bulk. Refuse a write that
+    # drops more than a quarter of what is on disk unless it is explicit.
+    if VAULT_FILE.exists() and not os.environ.get("SECRETBOX_ALLOW_SHRINK"):
+        try:
+            was = json.loads(VAULT_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            was = None
+        if was is not None:
+            def _count(v):
+                return sum(len(p.get("entries", {}))
+                           for p in v.get("projects", {}).values())
+            before, after = _count(was), _count(d)
+            if before and after < before * 0.75:
+                raise RuntimeError(
+                    f"refusing to shrink the vault from {before} to {after} "
+                    f"entries. Set SECRETBOX_ALLOW_SHRINK=1 if that is really "
+                    f"what you mean."
+                )
+
     fd, tmp = tempfile.mkstemp(dir=str(VAULT_FILE.parent))
     try:
         os.write(fd, json.dumps(d, ensure_ascii=False, indent=1).encode())
@@ -280,10 +320,65 @@ def all_slots() -> dict:
 
 
 def load_pages() -> list[dict]:
+    """Hand-written entries, plus every here.now site whose password we hold.
+
+    The here.now half is DERIVED, never stored here. When these four sites were
+    listed in pages.json with their passwords copied in by hand, changing a
+    password on here.now left this page serving the old one with no signal —
+    the page looked authoritative and was wrong. Reading the vault means the
+    displayed password is the password, or the row does not appear at all.
+    """
     try:
-        return json.loads(PAGES_FILE.read_text(encoding="utf-8"))
+        pages = json.loads(PAGES_FILE.read_text(encoding="utf-8"))
     except Exception:
-        return []
+        pages = []
+    pages = [p for p in pages if ".here.now/" not in (p.get("url") or "")]
+
+    try:
+        entries = load_vault().get("projects", {}).get("here-now", {}).get("entries", {})
+        meta = json.loads((ALFRED / "state" / "herenow-sites.json")
+                          .read_text(encoding="utf-8")).get("sites", {})
+    except Exception:
+        return pages
+
+    # Show when each page was last published. A here.now Site is a static
+    # snapshot: without a date on the row there is nothing to distinguish a
+    # report regenerated an hour ago from one frozen since last week, and the
+    # second kind is the one that quietly misleads.
+    import datetime as _dt
+    today = _dt.date.today()
+
+    def age(iso: str, verified: bool) -> str:
+        try:
+            d = _dt.datetime.fromisoformat(iso.replace("Z", "+00:00")).date()
+        except Exception:
+            return ""
+        days = (today - d).days
+        # Until the watcher has seen a version change for a site, all we have is
+        # updatedAt — which also moves on a password or metadata edit. Say
+        # "touched" for that, and "content" only once we know it is the content.
+        verb = "התוכן עודכן" if verified else "שינוי אחרון"
+        if days <= 0:
+            return f"{verb} היום"
+        if days == 1:
+            return f"{verb} אתמול"
+        if days < 7:
+            return f"{verb} לפני {days} ימים"
+        return f"⚠️ {verb} לפני {days} ימים · {d.isoformat()}"
+
+    sites = []
+    for key, entry in entries.items():
+        if not key.startswith("SITE_") or "value" not in entry:
+            continue
+        slug = key[5:].lower().replace("_", "-")
+        info = meta.get(slug, {})
+        sites.append({"name": info.get("name") or slug,
+                      "url": info.get("url") or f"https://{slug}.here.now/",
+                      "password": entry["value"],
+                      "note": age(info.get("content_at") or info.get("updated") or "",
+                                  bool(info.get("content_at"))) or slug})
+    sites.sort(key=lambda p: p["name"])
+    return pages + sites
 
 
 def fingerprint(value: str) -> str:

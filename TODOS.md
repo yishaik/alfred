@@ -95,6 +95,10 @@ Deferred deliberately on 2026-08-01 — the critical read path is covered.
 ---
 
 ## ✅ Done (recent)
+- [x] **Alfred timezone scoped to Israel** — systemd drop-in sets
+      `TZ=Asia/Jerusalem` for all four bridge services while the host remains
+      on UTC; applies on the next service start without interrupting the active
+      conversation — 2026-08-04
 - [x] **Dedicated Second Brain Managed Bot** — one-tap Telegram creation,
       isolated bridge/state, X Reader capture, brain search/read/ingestion and
       here.now publishing tools — 2026-08-03

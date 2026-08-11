@@ -1859,10 +1859,10 @@ async def _session_cb(q, s, tag: str, rest: list[str]):
     qid = int(rest[0]) if rest else 0
     st = s.questions.get(qid)
     if tag in ("qp", "qt", "qd", "qo") and not st:
-        try:
-            await q.edit_message_reply_markup(reply_markup=None)
-        except Exception:
-            pass
+        # An old keyboard still sitting in the chat history. Say so instead of
+        # just dropping the buttons — a silent no-op reads as a broken bot.
+        base = (q.message.text or "").split("\n⌛")[0]
+        await _edit(q, f"{base}\n⌛ (this question is no longer active)")
         return
 
     if tag == "qp":

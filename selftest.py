@@ -759,13 +759,15 @@ def test_soul():
 
 
 async def test_question_serialization():
-    """Two concurrent AskUserQuestions must be shown one at a time, each
-    waiting for its answer (no timeout, no answering for the user)."""
+    """Only one AskUserQuestion is ever on screen. A second one is DROPPED, not
+    parked behind the first: waiting on the lock is unbounded, and on 2026-08-11
+    that parked days of questions which all rendered at once after a restart."""
     from tgbridge.session import AgentSession
 
     s = AgentSession.__new__(AgentSession)
     s.questions, s.qcounter, s.sid = {}, 0, 1
     s._q_lock = asyncio.Lock()
+    s._q_tasks, s.generation = set(), 1
     shown = []
 
     class FakeOutbox:
@@ -786,10 +788,11 @@ async def test_question_serialization():
     await asyncio.sleep(0.005)          # let Q1 take the lock first
     t2 = asyncio.create_task(s._ask_question(q2))
     r1, r2 = await asyncio.gather(t1, t2)
-    check("question answers", r1 == "Q1 -> A" and r2 == "Q2 -> A", f"{r1} | {r2}")
+    check("question answered", r1 == "Q1 -> A", str(r1))
+    check("second question dropped", r2 is None, str(r2))
     kb_order = [x for x in shown if x.startswith("❓ Q")]
-    check("questions one at a time", kb_order == ["❓ Q1", "❓ Q2"], str(shown))
-    check("question queue notice", any(x.startswith("note:") for x in shown))
+    check("questions one at a time", kb_order == ["❓ Q1"], str(shown))
+    check("dropped-question notice", any(x.startswith("note:") for x in shown))
     check("no leftover question state", s.questions == {})
 
 

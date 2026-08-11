@@ -23,11 +23,20 @@ TOKEN="$(val OPS_BOT_TOKEN)"; [ -n "$TOKEN" ] || TOKEN="$(val BRIDGE_BOT_TOKEN)"
 CHAT="$(val BRIDGE_CHAT_ID)"
 [ -n "$TOKEN" ] && [ -n "$CHAT" ] || { echo "opsnotify: token or chat id missing" >&2; exit 1; }
 
-code=$(curl -sS -o /tmp/opsnotify-resp.json -w '%{http_code}' \
+# Per-invocation, not a fixed path. This runs as root from systemd units and as
+# ubuntu from the shell, and a shared file in a world-writable directory makes
+# delivery depend on who happened to run it last — curl then exits 23 (cannot
+# write output) even though the message was already sent, so the alert channel
+# reports failure at random. mktemp also stops a local user from pre-creating
+# the path, and keeps the response (which echoes the chat id) off 0644.
+resp="$(mktemp -t opsnotify-resp.XXXXXX)"
+trap 'rm -f "$resp"' EXIT
+
+code=$(curl -sS -o "$resp" -w '%{http_code}' \
   "https://api.telegram.org/bot${TOKEN}/sendMessage" \
   --data-urlencode "chat_id=${CHAT}" \
   --data-urlencode "text=${msg}" \
   -d "disable_web_page_preview=true")
 
-[ "$code" = "200" ] || { echo "opsnotify: HTTP $code — $(head -c 200 /tmp/opsnotify-resp.json)" >&2; exit 1; }
+[ "$code" = "200" ] || { echo "opsnotify: HTTP $code — $(head -c 200 "$resp")" >&2; exit 1; }
 echo "opsnotify: sent"

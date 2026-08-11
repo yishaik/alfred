@@ -773,7 +773,14 @@ class AgentManager:
         """
         bucket = f"peer:{peer}" if verified else "peer:<unverified>"
         if hop > MAX_HOPS:
-            log.warning("peer msg from %s dropped: hop %d", peer, hop)
+            # peercheck probes deliberately arrive above MAX_HOPS: an accepting
+            # peer authenticates them and drops them here, so checking the bus
+            # never costs an agent a turn. That drop is the probe SUCCEEDING —
+            # logging it as a warning buried the real ones under ~48/day.
+            if peer.endswith("/probe"):
+                log.debug("peer probe from %s dropped as designed: hop %d", peer, hop)
+            else:
+                log.warning("peer msg from %s dropped: hop %d", peer, hop)
             return
         if not self.pair_limiter.allow((bucket, agent or self.active)):
             log.warning("peer msg from %s dropped: pair rate limit", peer)
