@@ -199,6 +199,13 @@ CHECKS: dict[str, tuple[list[str], object, str]] = {
     # The URL carries the password, so it goes to psql through the environment,
     # never as an argv element — argv is world-readable in `ps` for the whole
     # life of the connection.
+    # Listing the account's own sites is the cheapest call that requires the
+    # key to be both valid and attached to an account — an unauthenticated
+    # request to here.now succeeds as an anonymous session rather than 401ing,
+    # so "it returned 200" is only meaningful on an owner-scoped endpoint.
+    "HERENOW_API_KEY": (["HERENOW_API_KEY"],
+        _simple("https://here.now/api/v1/publishes?limit=1",
+                "Authorization: Bearer $S"), "here.now"),
     "DATABASE_URL": (["DATABASE_URL"], lambda v: (
         lambda r: (r.returncode == 0, "connected" if r.returncode == 0
                    else (r.stderr or "").strip().splitlines()[-1][:80] if r.stderr else "failed"))(

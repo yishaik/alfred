@@ -104,6 +104,41 @@ def collect():
                 d["todos"].append((section, item.split(" — ")[0].strip(),
                                    (item.split(" — ", 1)[1] if " — " in item else "")))
 
+    # x-reader: absorbed from the separate dashboard page, which was a snapshot
+    # and had been showing July numbers all week.
+    xr = Path("/home/ubuntu/git/x-reader")
+    d["xr_last"] = sh("systemctl show -p InactiveEnterTimestamp --value "
+                      "x-reader-daily.service | cut -d' ' -f2-3", "—")
+    d["xr_ok"] = sh("systemctl show -p ExecMainStatus --value x-reader-daily.service", "?") == "0"
+    for name, key in (("candidates", "xr_cand"), ("highlighted", "xr_hi"),
+                      ("following", "xr_follow")):
+        try:
+            v = json.loads((xr / f"{name}.json").read_text(encoding="utf-8"))
+            d[key] = len(v) if isinstance(v, (list, dict)) else 0
+        except Exception:
+            d[key] = 0
+
+    # here.now pages, straight from the watcher's snapshot. A status page that
+    # cannot tell you which of your published pages went stale is missing the
+    # failure that prompted it.
+    d["sites"] = []
+    try:
+        meta = json.loads((Path("/home/ubuntu/alfred/state/herenow-sites.json"))
+                          .read_text(encoding="utf-8")).get("sites", {})
+        today = datetime.now(timezone.utc).date()
+        for slug, s in sorted(meta.items(), key=lambda kv: kv[1].get("name") or kv[0]):
+            stamp = s.get("content_at") or s.get("updated") or ""
+            try:
+                dd = datetime.fromisoformat(stamp.replace("Z", "+00:00")).date()
+                days = (today - dd).days
+            except Exception:
+                dd, days = None, 999
+            d["sites"].append((s.get("name") or slug, s.get("url") or "", days,
+                               dd.isoformat() if dd else "—",
+                               bool(s.get("content_at"))))
+    except Exception:
+        pass
+
     d["auth_results"] = []
     for label, cmd in d["auths"]:
         ok = subprocess.run(cmd, shell=True, capture_output=True,
@@ -141,6 +176,18 @@ def render(d):
         f'<div><b>{esc(title)}</b><div class="sub">{esc(detail)[:150] or "&nbsp;"}</div></div>'
         f'<div class="state">{esc(sect)}</div></div>'
         for sect, title, detail in d["todos"]) or '<div class="row"><div>אין קצוות פתוחים</div></div>'
+
+    # Age is the whole point of this block, so it drives the dot: green only
+    # while a page is plausibly current, red once it has clearly drifted.
+    sitesrows = "".join(
+        f'<div class="row">'
+        f'<span class="dot {"s-good" if days <= 1 else "s-warn" if days <= 7 else "s-crit"}"></span>'
+        f'<div><b>{esc(name)}</b><div class="sub">'
+        f'<a href="{esc(url)}" target="_blank" rel="noopener">{esc(url)}</a></div></div>'
+        f'<div class="state">{"היום" if days <= 0 else "אתמול" if days == 1 else f"לפני {days} ימים" if days < 900 else "—"}'
+        f'<div class="sub">{esc(stamp)}{"" if verified else " · שינוי אחרון"}</div></div></div>'
+        for name, url, days, stamp, verified in d["sites"]) or \
+        '<div class="row"><div>אין נתונים</div></div>'
 
     backup_warn = "" if d["backup_sync"] == "0" else '<div class="warn">⚠️ יש commit גיבוי שלא נדחף</div>'
     stale = f'<div class="warn">⚠️ אין קליטה חדשה מאז {esc(d["newest_capture"])} — x-reader לא רץ כאן</div>'
@@ -203,6 +250,19 @@ footer{{margin-top:34px;padding-top:14px;border-top:1px solid var(--grid);color:
   <div class="tile"><div class="v">{esc(d['backlog'])}</div><div class="k">ממתינות להטמעה</div></div>
   <div class="tile"><div class="v">{d['queued']}</div><div class="k">בתור understudy</div></div>
 </div>{stale}
+
+<h2>x-reader</h2>
+<div class="tiles">
+  <div class="tile"><div class="v">{d['xr_cand']}</div><div class="k">מועמדים</div></div>
+  <div class="tile"><div class="v">{d['xr_hi']}</div><div class="k">מסומנים</div></div>
+  <div class="tile"><div class="v">{d['xr_follow']}</div><div class="k">נעקבים</div></div>
+</div>
+<div class="card"><div class="row">
+<span class="dot {'s-good' if d['xr_ok'] else 's-crit'}"></span>
+<div><b>ריצה יומית אחרונה</b><div class="sub">scouts · search · enrich · ingest</div></div>
+<div class="state">{esc(d['xr_last'])}</div></div></div>
+
+<h2>הדפים שפורסמו</h2><div class="card">{sitesrows}</div>
 
 <h2>קצוות פתוחים</h2><div class="card">{todorows}</div>
 
