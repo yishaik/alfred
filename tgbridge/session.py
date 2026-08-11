@@ -39,8 +39,9 @@ import os
 
 from . import metrics
 from .config import (BOT_TURNS_PER_HOUR, CHAT_ID, CLAUDE_BIN,
-                     CLAUDE_INIT_TIMEOUT_MS, CONTEXT_WARN_PCT, MODEL,
-                     PERMISSION_TIMEOUT, TMP_DIR, TURN_WARN_SECONDS, WORKDIR)
+                     CLAUDE_INIT_TIMEOUT_MS, CLAUDE_MAX_BUFFER_SIZE,
+                     CONTEXT_WARN_PCT, MODEL, PERMISSION_TIMEOUT,
+                     QUESTION_TIMEOUT, TMP_DIR, TURN_WARN_SECONDS, WORKDIR)
 from .fmt import (SEP, fmt_duration, format_error, format_output,
                   format_tool_lines, summarize_tool, tool_icon)
 from .mood import Mood
@@ -220,6 +221,11 @@ class AgentSession:
         self.questions: dict[int, dict] = {}
         self.qcounter = 0
         self._q_lock = asyncio.Lock()   # one live question at a time
+        self._q_tasks: set[asyncio.Task] = set()  # fire-and-forget ask tasks
+        # Bumped on every (re)start. A question belongs to the generation that
+        # asked it: an answer that arrives after a restart or /clear is stale and
+        # is dropped rather than fed into a session that never asked.
+        self.generation = 0
         self.kb_store: dict[int, list[str]] = {}
         self.kbcounter = 0
         self.perms: dict[int, dict] = {}
@@ -338,6 +344,10 @@ class AgentSession:
             resume=self.session_id,
             cli_path=CLAUDE_BIN or None,
             stderr=self.stderr_tail.append,
+            # one oversized stdout line is a FATAL read error, not a dropped
+            # message — a single image Read at the 1MB default took the whole
+            # session down mid-turn. See CLAUDE_MAX_BUFFER_SIZE in config.
+            max_buffer_size=CLAUDE_MAX_BUFFER_SIZE,
             # keep the claude subprocess off the (possibly full) system drive;
             # give the init handshake extra headroom so a cold-start claude.exe
             # (freshly extracted after a reboot) doesn't trip the 60s default.
@@ -465,6 +475,7 @@ class AgentSession:
         self.client = client
         self.connected = True
         self.busy = False
+        self.generation += 1
         self._consumer = asyncio.create_task(self._consume())
         if self._typing is None or self._typing.done():
             self._typing = asyncio.create_task(self._typing_loop())
@@ -481,12 +492,21 @@ class AgentSession:
         self.connected = False
         # unblock anything waiting on the user / on a captured turn, or the
         # question lock, the can_use_tool callback and collect() would hang
-        # forever across a restart
+        # forever across a restart.
+        #
+        # A question belongs to the session that asked it. Cancelling the ask
+        # tasks (rather than only resolving their futures) is what keeps a stale
+        # question from surviving a restart: on 2026-08-11 questions asked days
+        # earlier were still parked here, rendered their buttons after a /clear,
+        # and their answers were fed into a session that had never asked them.
+        for t in list(self._q_tasks):
+            t.cancel()
+        self._q_tasks.clear()
         for st in list(self.questions.values()):
             f = st.get("future")
             if f and not f.done():
-                f.set_result("(session stopped before the user answered — "
-                             "ask again)")
+                f.set_result(None)      # None == no answer; never fed onward
+        self.questions.clear()
         for st in list(self.perms.values()):
             f = st.get("future")
             if f and not f.done():
@@ -923,8 +943,7 @@ class AgentSession:
                         # bypass mode: the tool auto-errors, so render buttons
                         # here and feed the tap back as the next user turn.
                         if self.cfg.auto_approve:
-                            asyncio.create_task(
-                                self._legacy_question(block.input))
+                            self._spawn_question(block.input)
                         continue
                     if block.name in FILE_TOOLS:
                         self.turn_files_touched = True
@@ -1185,6 +1204,11 @@ class AgentSession:
         # here too delivered the question/answer twice (the duplicate-question bug).
         if tool_name == "AskUserQuestion" and not self.cfg.auto_approve:
             answer = await self._ask_question(tool_input)
+            if answer is None:
+                return PermissionResultDeny(
+                    message="[bridge] the question was not asked (one is already "
+                            "waiting, or the session restarted). Do not re-ask "
+                            "now — wait for the user.")
             return PermissionResultDeny(
                 message=f"[bridge] user answered: {answer}. This denial is the "
                         "transport for the answer — continue, don't re-ask.")
@@ -1234,19 +1258,41 @@ class AgentSession:
         st["future"].set_result(verdict)
         return st["tool"]
 
+    def _spawn_question(self, tool_input: dict):
+        """Bypass-permissions path: fire-and-forget, tracked so a restart can
+        cancel it (an untracked task outlived its session — see _stop_locked)."""
+        task = asyncio.create_task(self._legacy_question(tool_input))
+        self._q_tasks.add(task)
+        task.add_done_callback(self._q_tasks.discard)
+
     async def _legacy_question(self, tool_input: dict):
         """Bypass-permissions path: buttons now, answer fed as the next turn."""
-        ans = await self._ask_question(tool_input)
-        await self.feed(ans)
+        try:
+            ans = await self._ask_question(tool_input)
+        except asyncio.CancelledError:
+            return
+        if ans is not None:
+            await self.feed(ans)
 
-    async def _ask_question(self, tool_input: dict) -> str:
-        """Render question(s) as buttons and wait for the user's answer —
-        indefinitely (a question is never answered on the user's behalf), and
-        strictly one question on screen at a time."""
+    async def _ask_question(self, tool_input: dict) -> str | None:
+        """Render question(s) as buttons and wait for the user's answer, strictly
+        one question on screen at a time.
+
+        Returns None when there is no answer to act on: a question was already
+        pending, the wait expired, or the session restarted underneath it. The
+        caller must not feed None onward — an answer only ever belongs to the
+        session generation that asked for it."""
         answers = []
         if self._q_lock.locked():
-            self.outbox.emit("❓ one question at a time — answer the pending "
-                             "question above first")
+            # Do NOT queue behind the live question. Waiting on the lock is
+            # unbounded, so an unanswered question used to park every later one
+            # for days; they then all rendered at once when it finally resolved.
+            log.info("dropping question (one already on screen): %.80s",
+                     str(tool_input.get("questions", ""))[:80])
+            self.outbox.emit("❓ a question is already waiting above — the newer "
+                             "one was dropped; answer that one first")
+            return None
+        gen = self.generation
         async with self._q_lock:
             for question in tool_input.get("questions", []):
                 self.qcounter += 1
@@ -1271,11 +1317,18 @@ class AgentSession:
                 self.outbox.keyboard("\n".join(lines), self.question_kb(qid),
                                      _remember)
                 try:
-                    ans = await fut
+                    ans = await asyncio.wait_for(fut, timeout=QUESTION_TIMEOUT)
+                except asyncio.TimeoutError:
+                    self.outbox.emit(
+                        f"⌛ no answer in {QUESTION_TIMEOUT // 3600}h — the "
+                        f"question expired: {st['q'][:120]}")
+                    ans = None
                 finally:
                     self.questions.pop(qid, None)
+                if ans is None or gen != self.generation:
+                    return None          # stopped, expired, or a restart raced us
                 answers.append(f"{st['q']} -> {ans}")
-        return " | ".join(answers) if answers else "(no questions)"
+        return " | ".join(answers) if answers else None
 
     def question_kb(self, qid: int) -> InlineKeyboardMarkup:
         st = self.questions[qid]
