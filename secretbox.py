@@ -584,12 +584,16 @@ border-top:1px solid var(--grid)">סוד חדש</h2>
             for pname, p in projs.items():
                 keys = sorted(k for k, e in p["entries"].items() if "value" in e)
                 live = sum(1 for e in p["entries"].values() if e.get("status") == "live")
+                key_links = ", ".join(
+                    f'{esc(k)} <a href="/reveal/{esc(pname)}/{esc(k)}" '
+                    f'style="color:#58a6ff;text-decoration:none" title="הצג ותעד">🔓</a>'
+                    for k in keys)
                 rows.append(
                     f'<details class="card"><summary style="cursor:pointer">'
                     f'<b>{esc(pname)}</b> <span class="st">· {len(keys)} ערכים'
                     + (f" · {live} אומתו" if live else "") + '</span></summary>'
-                    f'<div class="fp" style="margin-top:8px;line-height:1.9">'
-                    + ", ".join(esc(k) for k in keys) + "</div></details>")
+                    f'<div class="fp" style="margin-top:8px;line-height:2.1">'
+                    + key_links + "</div></details>")
             cards.append(
                 '<h2 style="font-size:1.05rem;margin:26px 0 10px;padding-top:16px;'
                 'border-top:1px solid var(--grid)">הכספת</h2>'
@@ -656,7 +660,71 @@ border-top:1px solid var(--grid)">סוד חדש</h2>
         if not self._identity_ok():
             self.send_error(403, "not your tailnet identity")
             return
+        # /reveal/<name> — show ONE secret's value in the browser to the
+        # tailnet-authenticated owner, and audit it. This is the ONLY read path
+        # that surfaces a raw value, and it exists ONLY here: there is no CLI
+        # --get, because a printed secret lands in an agent transcript. A human
+        # on their own tailnet device is a different trust boundary — but every
+        # reveal is still logged and announced.
+        if self.path.startswith("/reveal/"):
+            self._reveal(self.path[len("/reveal/"):])
+            return
         self._render()
+
+    def _reveal(self, ref: str):
+        from urllib.parse import unquote
+        # STRICTER than the rest of the page: reveal surfaces a raw value, so it
+        # must never use the localhost identity fail-open. Only a human arriving
+        # through `tailscale serve` (which sets Tailscale-User-Login) may reveal —
+        # a header-less 127.0.0.1 request, i.e. any agent/script on this box, is
+        # refused. This is what keeps the reveal path from becoming the CLI --get
+        # the whole design forbids.
+        who = self.headers.get("Tailscale-User-Login", "")
+        if not who or (EXPECT_LOGIN and not token_eq(who, EXPECT_LOGIN)):
+            self.send_error(403, "reveal requires a tailnet identity")
+            return
+        ref = unquote(ref).strip("/")
+        val, where, ambiguous = resolve(ref)
+        if ambiguous:
+            self._render(f"⚠️ <b>{esc(ref)}</b> קיים בכמה פרויקטים: {esc(', '.join(ambiguous))}. ציין PROJECT/KEY.")
+            return
+        if not val:
+            self._render(f"⚠️ אין סוד בשם <b>{esc(ref)}</b>.")
+            return
+        # Audit trail: who revealed what, when — fingerprint only in the log.
+        try:
+            with (ALFRED / "state" / "secret-access.jsonl").open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps({
+                    "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "who": who, "ref": ref, "where": where,
+                    "fingerprint": fingerprint(val)}) + "\n")
+        except Exception:
+            pass
+        try:
+            subprocess.run([str(ALFRED / "opsnotify.sh"),
+                            f"🔓 נחשף ערך: {ref}\nע\"י {who} · {fingerprint(val)}"],
+                           capture_output=True, timeout=25)
+        except Exception:
+            pass
+        page = ("<!doctype html><meta charset=utf-8>"
+                "<meta name=viewport content='width=device-width,initial-scale=1'>"
+                "<meta name=robots content=noindex>"
+                "<body style='font-family:system-ui;background:#0b0f14;color:#e6edf3;"
+                "max-width:32rem;margin:2rem auto;padding:1rem'>"
+                f"<p style='color:#8b98a5'>🔓 {esc(ref)} · <span style='font-size:.8rem'>{esc(where)}</span></p>"
+                "<textarea readonly onclick='this.select()' style='width:100%;height:5rem;"
+                "background:#111823;color:#e6edf3;border:1px solid #2a3644;border-radius:8px;"
+                f"padding:.6rem;font-family:monospace;font-size:.9rem'>{esc(val)}</textarea>"
+                "<p style='color:#8b98a5;font-size:.8rem'>ההצגה תועדה ונשלחה התראה. אל תשאיר/י את הדף פתוח.</p>"
+                "<a href='/secrets' style='color:#58a6ff'>← חזרה</a></body>")
+        data = page.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.end_headers()
+        self.wfile.write(data)
 
     def do_POST(self):
         # Path-agnostic on purpose: this app is mounted under /secrets by
@@ -719,17 +787,28 @@ border-top:1px solid var(--grid)">סוד חדש</h2>
             # box inherits. The optional project field keeps generic names like
             # DATABASE_URL from colliding across projects.
             project = (form.get("project") or [""])[0].strip() or "misc"
-            vault_put(project, ek, value, note=f"{name} · {how}")
+            final_ek, action = store_secret(project, ek, value, note=f"{name} · {how}")
             fp = fingerprint(value)
+            verb = {"stored": "נשמר בכספת", "duplicate": "כבר קיים (זהה) — לא נכתב שוב",
+                    "renamed": "כבר היה מפתח פעיל בשם הזה — נשמר בשם חדש",
+                    "replaced": "הישן נדחה ע\"י השירות — הוחלף (rotation)"}[action]
             try:
                 subprocess.run([str(ALFRED / "opsnotify.sh"),
-                                f"🔐 סוד חדש נשמר בכספת: {name}\n"
-                                f"מפתח: {project}/{ek}\n{fp}"],
+                                f"🔐 {verb}: {name}\n"
+                                f"מפתח: {project}/{final_ek}\n{fp}"],
                                capture_output=True, timeout=25)
             except Exception:
                 pass
-            self._render(f"✅ <b>{esc(name)}</b> נשמר בכספת כ-<code>{esc(project)}/{esc(ek)}</code> · {esc(how)}<br>"
-                         f"<span class='fp'>{fp}</span>")
+            note_html = ""
+            if action == "renamed":
+                note_html = (f"<br>המפתח הקיים <code>{esc(project)}/{esc(ek)}</code> עדיין עובד "
+                             f"(או שלא ניתן לאמת שמת), אז לא נדרס — החדש נשמר בנפרד.")
+            elif action == "replaced":
+                note_html = f"<br>המפתח הקודם נכשל בבדיקה חיה, אז הוחלף. הטביעה הישנה נשמרה ל-audit."
+            elif action == "duplicate":
+                note_html = "<br>הערך זהה למה שכבר שמור — לא נוצר כפל."
+            self._render(f"✅ <b>{esc(name)}</b> {esc(verb)} כ-<code>{esc(project)}/{esc(final_ek)}</code> · {esc(how)}"
+                         f"{note_html}<br><span class='fp'>{fp}</span>")
             return
 
         slot = all_slots().get(key)
@@ -868,14 +947,85 @@ def _bootstrap_claim(tok: str):
     return out, "delivered"
 
 
-def vault_put(project: str, key: str, value: str, note: str = "") -> None:
+def live_check(name: str, value: str):
+    """Best-effort answer to 'does this secret still authenticate?', reusing the
+    validators in secretcheck.py. Returns True (works / valid-but-unpaid),
+    False (the service rejected it), or None (no validator, or a multi-key check
+    we can't run in isolation). None means 'cannot tell' and must NEVER be read
+    as 'dead' — the whole anti-clobber rule turns on not destroying a key we
+    merely failed to verify."""
+    try:
+        import secretcheck
+        entry = secretcheck.CHECKS.get(name)
+        if not entry:
+            return None
+        keys, fn, _label = entry
+        if keys != [name]:          # needs sibling values we don't have here
+            return None
+        ok, _detail = fn([value])
+        return True if ok in (True, "warn") else False
+    except Exception:
+        return None
+
+
+def _next_free_name(base: str, entries: dict) -> str:
+    """base, base_2, base_3 … — the first that is not already an entry key."""
+    if base not in entries:
+        return base
+    i = 2
+    while f"{base}_{i}" in entries:
+        i += 1
+    return f"{base}_{i}"
+
+
+def store_secret(project: str, key: str, value: str, note: str = "",
+                 force: bool = False) -> tuple[str, str]:
+    """The single write path into the vault, with anti-clobber built in.
+
+    A new secret NEVER silently overwrites an existing one under the same name.
+    Returns (final_key, action):
+      · stored     — the name was free
+      · duplicate  — same name AND identical value already present (no write)
+      · renamed    — the name held a DIFFERENT value that still works (or could
+                     not be disproven), so the new value is filed under a fresh
+                     NAME_n and the old is left untouched
+      · replaced   — the name held a value the service now rejects (or force=True),
+                     so the new value rotates in and the old's fingerprint is
+                     recorded under the project's `retired` list
+    """
     vault = load_vault()
-    p = vault.setdefault("projects", {}).setdefault(
+    bucket = vault.setdefault("projects", {}).setdefault(
         project, {"description": "", "entries": {}})
-    p["entries"][key] = {"value": value, "status": "unverified",
-                         "added": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                         **({"note": note} if note else {})}
+    entries = bucket["entries"]
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    existing = entries.get(key)
+    if existing is None:
+        final, action = key, "stored"
+    elif existing.get("value") == value:
+        return key, "duplicate"                       # exact dup — nothing to do
+    elif force or live_check(key, existing.get("value", "")) is False:
+        final, action = key, "replaced"               # old is dead → rotate
+        bucket.setdefault("retired", []).append({
+            "key": key, "fingerprint": fingerprint(existing.get("value", "")),
+            "retired": stamp,
+            "reason": "forced" if force else "superseded (old failed live check)"})
+    else:
+        final, action = _next_free_name(key, entries), "renamed"  # old lives → keep both
+
+    entry = {"value": value, "status": "unverified", "added": stamp}
+    if note:
+        entry["note"] = note
+    if action == "replaced":
+        entry["rotated_from"] = fingerprint(existing.get("value", ""))
+    entries[final] = entry
     save_vault(vault)
+    return final, action
+
+
+def vault_put(project: str, key: str, value: str, note: str = "") -> None:
+    """Back-compat shim — every caller now goes through the anti-clobber path."""
+    store_secret(project, key, value, note)
 
 
 GRANTS_FILE = ALFRED / "grants.json"
@@ -999,10 +1149,6 @@ def ingest_secrets(payload: dict, project: str = "") -> dict:
     """
     out = {}
     project = project or str(payload.get("__project__") or "").strip() or "ingested"
-    vault = load_vault()
-    bucket = vault.setdefault("projects", {}).setdefault(
-        project, {"description": "הועבר ממכונה אחרת", "entries": {}})
-    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     for raw_name, value in payload.items():
         if raw_name == "__project__" or not isinstance(value, str) or not value.strip():
             continue
@@ -1011,9 +1157,11 @@ def ingest_secrets(payload: dict, project: str = "") -> dict:
         if ek in PROTECTED:
             out[raw_name] = "refused: protected config key"
             continue
-        bucket["entries"][ek] = {"value": value, "status": "unverified", "added": stamp}
-        out[raw_name] = f"{project}/{ek} {fingerprint(value)}"
-    save_vault(vault)
+        # Anti-clobber: a machine push must not overwrite a working key any more
+        # than a hand-entered one does. store_secret renames around a live key
+        # and only replaces one the service already rejects.
+        final, action = store_secret(project, ek, value)
+        out[raw_name] = f"{project}/{final} {fingerprint(value)} ({action})"
     return out
 
 
@@ -1095,8 +1243,125 @@ def run_with(names: list[str], argv: list[str]) -> int:
     return p.returncode
 
 
+def rotate(ref: str, force: bool = False) -> int:
+    """Deliberately replace a secret's value with a new one read from STDIN
+    (never argv, so it stays out of `ps`). Safety: if the KEY has a validator,
+    the NEW value is verified BEFORE the old is retired — you never rotate to a
+    key the service already rejects. --force skips that guard. The old value's
+    fingerprint is kept in the project's `retired` list either way.
+
+        printf %s "$NEWVAL" | secretbox.py --rotate PROJECT/KEY
+    """
+    project, _, key = ref.rpartition("/")
+    if not project or not key:
+        print("secretbox: --rotate needs PROJECT/KEY", flush=True)
+        return 2
+    new = sys.stdin.read().strip()
+    if not new:
+        print("secretbox: no new value on stdin", flush=True)
+        return 2
+    live = live_check(key, new)
+    if live is False and not force:
+        print(f"secretbox: REFUSING — the new value for {key} fails its live check "
+              f"(the service rejects it). Re-run with --force to rotate anyway.", flush=True)
+        return 1
+    final, action = store_secret(project, key, new, force=True)
+    verdict = {True: "verified live", None: "no validator (unverified)",
+               False: "FORCED past a failed check"}[live]
+    print(f"secretbox: rotated {project}/{final} ({action}) — new value {verdict}; "
+          f"{fingerprint(new)}", flush=True)
+    try:
+        subprocess.run([str(ALFRED / "opsnotify.sh"),
+                        f"🔁 מפתח סובב: {project}/{final}\n{verdict} · {fingerprint(new)}"],
+                       capture_output=True, timeout=25)
+    except Exception:
+        pass
+    return 0
+
+
+def _canon_project(name: str) -> str:
+    """Fold punctuation/case so 'Yishaik.com' and 'yishaik-com' group together."""
+    return re.sub(r"[.\-_ ]+", "-", name.strip().lower()).strip("-")
+
+
+def tidy(apply: bool = False) -> int:
+    """Report (and with apply=True, fix) vault untidiness WITHOUT ever losing a
+    distinct secret:
+      · project-name variants (dot/dash/case) are merged into one canonical name;
+        entries move via store_secret, so a name clash with a DIFFERENT value is
+        kept as NAME_2 rather than overwritten
+      · identical VALUES held under several names are reported (never auto-deleted
+        — which of the duplicates other code references is not ours to guess)
+      · the same key name in several projects with DIFFERENT values is reported as
+        correct-by-design (kept, distinguished by project)
+    """
+    from collections import defaultdict
+    vault = load_vault()
+    projs = vault.get("projects", {})
+
+    groups = defaultdict(list)
+    for n in projs:
+        groups[_canon_project(n)].append(n)
+
+    moves = []
+    for canon, variants in groups.items():
+        if len(variants) < 2:
+            continue
+        # Canonical target: prefer an existing variant already in dash-lower form.
+        target = next((v for v in variants if v == canon), None) or sorted(variants, key=len)[0]
+        for src in variants:
+            if src == target:
+                continue
+            for k, e in list(projs.get(src, {}).get("entries", {}).items()):
+                if "value" not in e:
+                    continue
+                if apply:
+                    final, action = store_secret(target, k, e["value"], e.get("note", ""))
+                    moves.append(f"{src}/{k} → {target}/{final} ({action})")
+                else:
+                    moves.append(f"{src}/{k} → {target}/{k}")
+
+    if apply:
+        # store_secret copied every value-entry into the target; now retire the
+        # variant source projects wholesale (their secrets are safely in target,
+        # whether as an exact duplicate, a renamed NAME_2, or a rotation).
+        vault = load_vault()
+        for canon, variants in groups.items():
+            if len(variants) < 2:
+                continue
+            target = next((v for v in variants if v == canon), None) or sorted(variants, key=len)[0]
+            for src in variants:
+                if src != target:
+                    vault.get("projects", {}).pop(src, None)
+        save_vault(vault)
+
+    print(("APPLIED" if apply else "DRY RUN") + " — project-variant merges:")
+    print("  " + "\n  ".join(moves) if moves else "  (no project-name variants)")
+
+    # value-duplicate + same-key-different-value reports (informational)
+    byval, bykey = defaultdict(list), defaultdict(list)
+    for pn, p in load_vault().get("projects", {}).items():
+        for k, e in p.get("entries", {}).items():
+            if "value" in e:
+                byval[e["value"]].append(f"{pn}/{k}")
+                bykey[k].append((pn, e["value"]))
+    dups = {fingerprint(v): locs for v, locs in byval.items() if len(locs) > 1}
+    print("\nidentical values under multiple names (kept — dedupe by hand if intended):")
+    print("  " + "\n  ".join(f"{fp} → {locs}" for fp, locs in dups.items()) if dups else "  (none)")
+    print("\nsame key in multiple projects with DIFFERENT values (correct — kept both):")
+    diffs = [k for k, l in bykey.items() if len(l) > 1 and len({fingerprint(v) for _, v in l}) > 1]
+    print("  " + "\n  ".join(diffs) if diffs else "  (none)")
+    return 0
+
+
 if __name__ == "__main__":
     import sys
+    if "--tidy" in sys.argv:
+        raise SystemExit(tidy(apply="--apply" in sys.argv))
+    if "--rotate" in sys.argv:
+        i = sys.argv.index("--rotate")
+        ref = sys.argv[i + 1] if len(sys.argv) > i + 1 else ""
+        raise SystemExit(rotate(ref, force="--force" in sys.argv))
     if "--grant" in sys.argv:
         i = sys.argv.index("--grant")
         peer, key = sys.argv[i + 1], sys.argv[i + 2]
