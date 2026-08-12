@@ -549,6 +549,37 @@ border-radius:999px;padding:4px 6px 4px 11px;font-family:ui-monospace,monospace;
 .chip form{display:inline;margin:0}
 .chip button{all:unset;cursor:pointer;padding:0 4px;line-height:1;border-radius:999px;color:inherit}
 .chip button:hover{filter:brightness(1.15)}
+.search{margin:0 0 16px;font-family:inherit}
+.grp{background:var(--s);border:1px solid var(--ring);border-radius:14px;margin-bottom:11px;
+box-shadow:0 1px 2px rgba(16,24,40,.04);overflow:hidden}
+.grp>summary{list-style:none;display:flex;align-items:center;gap:9px;padding:14px 16px;cursor:pointer}
+.grp>summary::-webkit-details-marker{display:none}
+.grp>summary::after{content:"›";margin-inline-start:auto;color:var(--mut);font-size:1.15rem;
+transition:transform .15s}
+.grp[open]>summary::after{transform:rotate(90deg)}
+.grp>summary .glock{width:26px;height:26px;flex:none;border-radius:8px;background:var(--chip);
+color:var(--chip-ink);display:grid;place-items:center;font-size:.8rem}
+.grp>summary b{font-weight:600;font-size:.95rem}
+.grp>summary .st{margin-inline-start:0}
+.grows{border-top:1px solid var(--grid)}
+.krow{padding:11px 14px;border-bottom:1px solid var(--grid)}
+.krow:last-child{border-bottom:none}
+.kmain{display:flex;align-items:center;gap:10px}
+.klock{flex:none;color:var(--mut);font-size:.9rem;opacity:.85}
+.kcol{flex:1;min-width:0}
+.kname{display:block;font-family:ui-monospace,monospace;font-size:.86rem;font-weight:600;
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kfp{display:block;font-family:ui-monospace,monospace;font-size:.7rem;color:var(--mut);
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kacts{flex:none;display:flex;align-items:center;gap:2px}
+.icon{all:unset;box-sizing:border-box;cursor:pointer;width:34px;height:34px;border-radius:8px;
+display:grid;place-items:center;font-size:1rem;color:var(--ink2);transition:background .15s}
+.icon:hover{background:var(--s2)}
+.ib{display:inline;margin:0}
+.keditor{display:flex;gap:8px;margin-top:10px}
+.keditor[hidden]{display:none}
+.keditor input{flex:1}.keditor button{margin-top:0;width:auto;padding:0 16px;white-space:nowrap}
+.knote{font-size:.76rem;color:var(--mut);margin-top:6px;padding-inline-start:26px}
 </style></head><body><div class="w">
 <header><div class="lock">🔒</div><div><h1>Secretbox</h1>
 <p class="sub">כספת הסודות של אלפרד</p></div></header>
@@ -581,29 +612,76 @@ class Handler(BaseHTTPRequestHandler):
             return self.client_address[0] in ("127.0.0.1", "::1")
         return token_eq(got, EXPECT_LOGIN)
 
+    def _key_row(self, name, reveal_ref, set_ref, cur, note="", prefix=""):
+        """One secret, rendered identically whether it is an alfred-core .env
+        slot or a vault entry: 🔒 name + status dot + fingerprint, a 🔓 reveal,
+        and an inline ✎ editor to set/rotate the value."""
+        dot = "ok" if cur else "no"
+        fp = fingerprint(cur) if cur else "—"
+        reveal = (f'<form method="POST" action="" class="ib">'
+                  f'<input type="hidden" name="reveal" value="{esc(reveal_ref)}">'
+                  f'<button class="icon" title="חשוף והעתק">👁</button></form>') if cur else ''
+        ph = f"צריך להתחיל ב-{prefix}" if prefix else ("עדכן ערך" if cur else "הדבק ערך חדש")
+        editor = (f'<form method="POST" action="" class="keditor" hidden>'
+                  f'<input type="hidden" name="setkey" value="{esc(set_ref)}">'
+                  f'<input type="password" name="value" placeholder="{esc(ph)}" '
+                  f'autocomplete="new-password" spellcheck="false">'
+                  f'<button type="submit">{"עדכן" if cur else "שמור"}</button></form>')
+        toggle = ("onclick=\"var e=this.closest('.krow').querySelector('.keditor');"
+                  "e.hidden=!e.hidden;if(!e.hidden)e.querySelector('input').focus()\"")
+        return (f'<div class="krow" data-k="{esc(name.lower())}">'
+                f'<div class="kmain"><span class="klock">🔒</span>'
+                f'<span class="kcol"><span class="kname">{esc(name)}</span>'
+                f'<span class="kfp">{esc(fp)}</span></span>'
+                f'<span class="dot {dot}"></span>'
+                f'<span class="kacts">{reveal}'
+                f'<button class="icon" type="button" title="עדכן/החלף" {toggle}>✎</button>'
+                f'</span></div>{editor}'
+                + (f'<div class="knote">{esc(note)}</div>' if note else '') + '</div>')
+
+    def _group(self, title, count, rows, is_open=False):
+        return (f'<details class="grp"{" open" if is_open else ""}><summary>'
+                f'<span class="glock">🔒</span><b>{esc(title)}</b>'
+                f'<span class="st">{count} מפתחות</span></summary>'
+                f'<div class="grows">{rows}</div></details>')
+
     def _render(self, msg=""):
         cards = []
-        for key, slot in all_slots().items():
-            cur = read_current(slot)
-            dot = "ok" if cur else "no"
-            state = "קיים" if cur else "לא מוגדר"
-            fp = f'<div class="fp">{fingerprint(cur)}</div>' if cur else ""
-            cards.append(f"""<div class="card">
-<div class="hd"><b><span class="dot {dot}"></span>{esc(slot["label"])}</b><span class="st">{state}</span></div>
-<div class="note">{esc(slot["note"])}</div>{fp}
-<form method="POST" action="" autocomplete="off">
-<input type="hidden" name="slot" value="{key}">
-<input type="password" name="value" placeholder="הדבק כאן" autocomplete="new-password" spellcheck="false">
-<button type="submit">שמור ואמת</button></form>
-</div>""")
-        # Free-form slot: a name and a value. No verification is possible for a
-        # secret we know nothing about, so it is stored as given — the name is
-        # normalised to an env key and protected config keys are refused.
+        # One live client-side filter across every key in every group.
+        cards.append(
+            '<input class="search" id="q" placeholder="🔍 חיפוש מפתח…" '
+            'oninput="var v=this.value.toLowerCase();'
+            "document.querySelectorAll('.grp').forEach(function(g){var any=false;"
+            "g.querySelectorAll('.krow').forEach(function(r){"
+            "var m=r.dataset.k.indexOf(v)>-1;r.style.display=m?'':'none';if(m)any=true;});"
+            "g.style.display=any?'':'none';if(v)g.open=true;});\">")
+
+        # Group 1 — alfred's own .env-backed slots, in the SAME row style as the
+        # vault. reveal_ref is the bare KEY (resolve() finds it in .env);
+        # set_ref 'slot:KEY' routes the update through verify + write_secret.
+        core = "".join(
+            self._key_row(slot["label"], key, f"slot:{key}", read_current(slot),
+                          slot.get("note", ""), slot.get("prefix", ""))
+            for key, slot in all_slots().items())
+        cards.append(self._group("ליבת אלפרד", len(all_slots()), core, is_open=True))
+
+        # Groups 2..N — every vault project, identical row style.
+        vault = load_vault()
+        for pname, p in sorted(vault.get("projects", {}).items()):
+            entries = {k: e for k, e in p.get("entries", {}).items() if "value" in e}
+            if not entries:
+                continue
+            rows = "".join(
+                self._key_row(k, f"{pname}/{k}", f"vault:{pname}/{k}", e["value"])
+                for k, e in sorted(entries.items()))
+            cards.append(self._group(pname, len(entries), rows))
+
+        # Add a brand-new secret (auto-named, anti-clobber applied by store_secret).
         cards.append("""
 <h2 class="sec">סוד חדש</h2>
 <div class="card">
-<div class="note">תאר במילים שלך מה הסוד, בעברית או באנגלית. אזהה את השירות לפי חתימת הערך, ואם לא — אבין מהתיאור. השם הטכני ייקבע אוטומטית
-ויישמר ב-.env של אלפרד. אין אימות מול שירות — סוד שלא מוכר לנו נשמר כפי שהוא.</div>
+<div class="note">תאר במילים שלך מה הסוד. אזהה את השירות לפי חתימת הערך, ואם לא — אבין מהתיאור.
+אם השם כבר קיים והערך שונה — לא נדרס: יישמר בשם חדש (אלא אם הישן כבר לא עובד).</div>
 <form method="POST" action="" autocomplete="off">
 <input type="hidden" name="slot" value="__new__">
 <input name="name" placeholder="מה זה? למשל: הטוקן של טוויליו" required maxlength="120" style="margin-bottom:8px">
@@ -611,37 +689,6 @@ class Handler(BaseHTTPRequestHandler):
 <input type="password" name="value" placeholder="הערך" required
  autocomplete="new-password" spellcheck="false">
 <button type="submit">שמור בכספת</button></form></div>""")
-
-        # The vault is shown as a per-project roll-up, never row-by-row: when
-        # ~230 entries each got their own card this page stopped being usable
-        # on a phone, which is the only device it is ever opened from.
-        vault = load_vault()
-        projs = {n: p for n, p in sorted(vault.get("projects", {}).items())
-                 if any("value" in e for e in p.get("entries", {}).values())}
-        if projs:
-            total = sum(sum(1 for e in p["entries"].values() if "value" in e)
-                        for p in projs.values())
-            rows = []
-            for pname, p in projs.items():
-                keys = sorted(k for k, e in p["entries"].items() if "value" in e)
-                live = sum(1 for e in p["entries"].values() if e.get("status") == "live")
-                chips = "".join(
-                    f'<span class="chip">{esc(k)}'
-                    f'<form method="POST" action="">'
-                    f'<input type="hidden" name="reveal" value="{esc(pname)}/{esc(k)}">'
-                    f'<button type="submit" title="הצג ותעד">🔓</button>'
-                    f'</form></span>'
-                    for k in keys)
-                rows.append(
-                    f'<details class="card"><summary>'
-                    f'<b>{esc(pname)}</b><span class="st">{len(keys)} ערכים'
-                    + (f" · {live} אומתו" if live else "") + '</span></summary>'
-                    f'<div class="keys">' + chips + "</div></details>")
-            cards.append(
-                '<h2 class="sec">הכספת</h2>'
-                f'<p class="note" style="margin:-4px 2px 12px">{total} ערכים שמורים, '
-                f'לא נטענים לסביבה של אף תהליך. 🔓 חושף ומעתיק ערך. '
-                f'שליפה בשורת פקודה: <code>secretbox.py --run KEY -- פקודה</code></p>' + "".join(rows))
 
         pages = load_pages()
         if pages:
@@ -840,6 +887,55 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(403, "reveal requires a tailnet identity")
                 return
             self._render_reveal(reveal_ref, who)
+            return
+
+        # Inline per-key editor (the ✎ on every row). One field for every key
+        # type: 'slot:KEY' goes through the verified .env write; 'vault:P/K' is a
+        # deliberate in-place rotation (force replace, old fingerprint retired).
+        set_ref = (form.get("setkey") or [""])[0].strip()
+        if set_ref:
+            if not value:
+                self._render("לא התקבל ערך.")
+                return
+            kind, _, target = set_ref.partition(":")
+            if kind == "slot":
+                slot = all_slots().get(target)
+                if not slot:
+                    self._render("סלוט לא ידוע.")
+                    return
+                pref = slot.get("prefix")
+                if pref and not value.startswith(pref):
+                    self._render(f"נראה שגוי — {esc(slot['label'])} אמור להתחיל ב-<code>{pref}</code>. לא נשמר.")
+                    return
+                ok, detail = verify(slot, value)
+                if not ok:
+                    self._render(f"❌ {esc(slot['label'])}: {esc(detail)}. <b>לא נשמר</b> — הסוד הקודם נשאר בתוקף.")
+                    return
+                write_secret(slot, value)
+                fp = fingerprint(value)
+                try:
+                    subprocess.run([str(ALFRED / "opsnotify.sh"),
+                                    f"🔐 עודכן: {slot['label']}\n{fp}\n{detail}"],
+                                   capture_output=True, timeout=25)
+                except Exception:
+                    pass
+                self._render(f"✅ {esc(slot['label'])} נשמר ואומת{esc(restart_after(slot))}.<br><span class='fp'>{fp}</span>")
+                return
+            if kind == "vault":
+                project, _, k = target.rpartition("/")
+                if not project or not k:
+                    self._render("מפתח כספת לא תקין.")
+                    return
+                final, action = store_secret(project, k, value, force=True)
+                fp = fingerprint(value)
+                try:
+                    subprocess.run([str(ALFRED / "opsnotify.sh"),
+                                    f"🔁 עודכן {project}/{final}\n{fp}"], capture_output=True, timeout=25)
+                except Exception:
+                    pass
+                self._render(f"✅ <b>{esc(k)}</b> עודכן ב-<code>{esc(project)}</code> (הישן נשמר ל-audit).<br><span class='fp'>{fp}</span>")
+                return
+            self._render("בקשה לא מובנת.")
             return
 
         if key == "__new__":
