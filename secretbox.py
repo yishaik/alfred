@@ -487,31 +487,73 @@ def verify(slot: dict, value: str) -> tuple[bool, str]:
 
 
 PAGE = """<!DOCTYPE html><html lang="he" dir="rtl"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>Secretbox</title><style>
-:root{color-scheme:light dark;--s:#fcfcfb;--p:#f9f9f7;--ink:#0b0b0b;--ink2:#52514e;--mut:#898781;
---grid:#e1e0d9;--ring:rgba(11,11,11,.10);--good:#0ca30c;--warn:#fab219;--acc:#2a78d6}
-@media(prefers-color-scheme:dark){:root{--s:#1a1a19;--p:#0d0d0d;--ink:#fff;--ink2:#c3c2b7;
---grid:#2c2c2a;--ring:rgba(255,255,255,.10);--acc:#3987e5}}
-*{box-sizing:border-box}body{margin:0;padding:20px 14px 60px;background:var(--p);color:var(--ink);
-font-family:system-ui,-apple-system,sans-serif;line-height:1.55}.w{max-width:620px;margin:0 auto}
-h1{font-size:1.4rem;margin:0 0 4px}.meta{color:var(--ink2);font-size:.85rem;margin:0 0 20px}
-.card{background:var(--s);border:1px solid var(--ring);border-radius:12px;padding:14px 16px;margin-bottom:11px}
-.hd{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
-.hd b{font-size:1rem}.st{font-size:.75rem;color:var(--ink2);white-space:nowrap}
-.note{font-size:.82rem;color:var(--ink2);margin:3px 0 9px}
-.fp{font-family:ui-monospace,monospace;font-size:.76rem;color:var(--mut)}
-input{width:100%;padding:11px 12px;font-size:16px;border:1px solid var(--ring);border-radius:9px;
-background:var(--p);color:var(--ink);font-family:ui-monospace,monospace}
-button{margin-top:8px;width:100%;padding:11px;font-size:.95rem;font-weight:600;border:none;
-border-radius:9px;background:var(--acc);color:#fff}
-a{color:var(--acc);font-size:.82rem}
-.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-inline-end:5px}
-.ok{background:var(--good)}.no{background:var(--warn)}
-.msg{padding:11px 14px;border-radius:10px;margin-bottom:16px;font-size:.9rem;
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b0f19"><title>Secretbox</title><style>
+:root{color-scheme:light dark;
+--bg:#f5f6f8;--s:#ffffff;--s2:#f8f9fb;--ink:#101828;--ink2:#475467;--mut:#98a2b3;
+--grid:#e4e7ec;--ring:rgba(16,24,40,.06);--good:#12b76a;--warn:#f79009;--bad:#f04438;
+--acc:#4f46e5;--acc-ink:#ffffff;--chip:#f2f4ff;--chip-ink:#4338ca}
+@media(prefers-color-scheme:dark){:root{
+--bg:#0b0f19;--s:#141a27;--s2:#0f1520;--ink:#f2f4f7;--ink2:#98a2b3;--mut:#667085;
+--grid:#232b3a;--ring:rgba(255,255,255,.05);--acc:#7c8cff;--acc-ink:#0b0f19;
+--chip:#1b2233;--chip-ink:#aeb8ff}}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;padding:max(20px,env(safe-area-inset-top)) 16px 64px;background:var(--bg);
+color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;line-height:1.55;
+-webkit-font-smoothing:antialiased}
+.w{max-width:640px;margin:0 auto}
+header{display:flex;align-items:center;gap:12px;margin:4px 0 6px}
+.lock{width:40px;height:40px;flex:none;border-radius:11px;background:var(--acc);color:var(--acc-ink);
+display:grid;place-items:center;font-size:1.15rem;box-shadow:0 2px 8px rgba(79,70,229,.28)}
+h1{font-size:1.35rem;margin:0;letter-spacing:-.01em;font-weight:700}
+.sub{color:var(--ink2);font-size:.84rem;margin:1px 0 0}
+.banner{display:flex;gap:9px;align-items:flex-start;background:var(--s);border:1px solid var(--ring);
+border-radius:12px;padding:11px 13px;margin:16px 0 22px;font-size:.82rem;color:var(--ink2)}
+.banner .i{flex:none;opacity:.7}
+.sec{font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;
+color:var(--mut);margin:28px 2px 11px;display:flex;align-items:center;gap:10px}
+.sec::after{content:"";flex:1;height:1px;background:var(--grid)}
+.card{background:var(--s);border:1px solid var(--ring);border-radius:14px;padding:15px 16px;
+margin-bottom:11px;box-shadow:0 1px 2px rgba(16,24,40,.04);transition:border-color .15s}
+.card:focus-within{border-color:var(--acc)}
+.hd{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.hd b{font-size:.98rem;font-weight:600;display:flex;align-items:center;gap:7px}
+.st{font-size:.72rem;color:var(--ink2);white-space:nowrap;background:var(--s2);
+border:1px solid var(--grid);border-radius:999px;padding:2px 9px}
+.note{font-size:.82rem;color:var(--ink2);margin:6px 0 11px}
+.fp{font-family:ui-monospace,SFMono-Regular,monospace;font-size:.74rem;color:var(--mut);
+margin-top:2px;word-break:break-all}
+input{width:100%;padding:12px 13px;font-size:16px;border:1px solid var(--grid);border-radius:10px;
+background:var(--s2);color:var(--ink);font-family:ui-monospace,monospace;transition:border-color .15s,box-shadow .15s}
+input:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 22%,transparent)}
+button{margin-top:10px;width:100%;min-height:44px;padding:11px;font-size:.95rem;font-weight:600;
+border:none;border-radius:10px;background:var(--acc);color:var(--acc-ink);cursor:pointer;
+transition:filter .15s,transform .05s}
+button:hover{filter:brightness(1.06)}button:active{transform:translateY(1px)}
+a{color:var(--acc);font-size:.82rem;text-decoration:none}a:hover{text-decoration:underline}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;flex:none}
+.ok{background:var(--good);box-shadow:0 0 0 3px color-mix(in srgb,var(--good) 20%,transparent)}
+.no{background:var(--warn);box-shadow:0 0 0 3px color-mix(in srgb,var(--warn) 20%,transparent)}
+.msg{padding:12px 14px;border-radius:12px;margin-bottom:18px;font-size:.88rem;line-height:1.5;
 background:var(--s);border:1px solid var(--ring);border-inline-start:3px solid var(--acc)}
+details.card summary{list-style:none;display:flex;align-items:center;gap:8px}
+details.card summary::-webkit-details-marker{display:none}
+details.card summary::before{content:"›";color:var(--mut);font-size:1.1rem;transition:transform .15s;line-height:1}
+details.card[open] summary::before{transform:rotate(90deg)}
+details.card summary b{font-weight:600}
+details.card summary .st{margin-inline-start:auto}
+.keys{margin-top:11px;display:flex;flex-wrap:wrap;gap:7px}
+.chip{display:inline-flex;align-items:center;gap:2px;background:var(--chip);color:var(--chip-ink);
+border-radius:999px;padding:4px 6px 4px 11px;font-family:ui-monospace,monospace;font-size:.78rem}
+.chip form{display:inline;margin:0}
+.chip button{all:unset;cursor:pointer;padding:0 4px;line-height:1;border-radius:999px;color:inherit}
+.chip button:hover{filter:brightness(1.15)}
 </style></head><body><div class="w">
-<h1>Secretbox</h1>
-<p class="meta">מגיע רק מה-tailnet שלך. הערך נכתב ישירות לדיסק — לא עובר בטלגרם ולא נכנס להקשר של הסוכן.</p>
+<header><div class="lock">🔒</div><div><h1>Secretbox</h1>
+<p class="sub">כספת הסודות של אלפרד</p></div></header>
+<div class="banner"><span class="i">🛡️</span><span>מגיע רק מה-tailnet שלך. הערך נכתב ישירות לדיסק —
+לא עובר בטלגרם ולא נכנס להקשר של הסוכן. חשיפת ערך מתועדת ומדווחת.</span></div>
 __MSG__ __CARDS__
 </div></body></html>"""
 
@@ -558,8 +600,7 @@ class Handler(BaseHTTPRequestHandler):
         # secret we know nothing about, so it is stored as given — the name is
         # normalised to an env key and protected config keys are refused.
         cards.append("""
-<h2 style="font-size:1.05rem;margin:26px 0 10px;padding-top:16px;
-border-top:1px solid var(--grid)">סוד חדש</h2>
+<h2 class="sec">סוד חדש</h2>
 <div class="card">
 <div class="note">תאר במילים שלך מה הסוד, בעברית או באנגלית. אזהה את השירות לפי חתימת הערך, ואם לא — אבין מהתיאור. השם הטכני ייקבע אוטומטית
 ויישמר ב-.env של אלפרד. אין אימות מול שירות — סוד שלא מוכר לנו נשמר כפי שהוא.</div>
@@ -584,26 +625,23 @@ border-top:1px solid var(--grid)">סוד חדש</h2>
             for pname, p in projs.items():
                 keys = sorted(k for k, e in p["entries"].items() if "value" in e)
                 live = sum(1 for e in p["entries"].values() if e.get("status") == "live")
-                key_links = " ".join(
-                    f'<span style="white-space:nowrap">{esc(k)}'
-                    f'<form method="POST" action="" style="display:inline">'
+                chips = "".join(
+                    f'<span class="chip">{esc(k)}'
+                    f'<form method="POST" action="">'
                     f'<input type="hidden" name="reveal" value="{esc(pname)}/{esc(k)}">'
-                    f'<button type="submit" title="הצג ותעד" style="background:none;border:0;'
-                    f'color:#58a6ff;cursor:pointer;padding:0 8px 0 2px;font-size:1em">🔓</button>'
+                    f'<button type="submit" title="הצג ותעד">🔓</button>'
                     f'</form></span>'
                     for k in keys)
                 rows.append(
-                    f'<details class="card"><summary style="cursor:pointer">'
-                    f'<b>{esc(pname)}</b> <span class="st">· {len(keys)} ערכים'
+                    f'<details class="card"><summary>'
+                    f'<b>{esc(pname)}</b><span class="st">{len(keys)} ערכים'
                     + (f" · {live} אומתו" if live else "") + '</span></summary>'
-                    f'<div class="fp" style="margin-top:8px;line-height:2.1">'
-                    + key_links + "</div></details>")
+                    f'<div class="keys">' + chips + "</div></details>")
             cards.append(
-                '<h2 style="font-size:1.05rem;margin:26px 0 10px;padding-top:16px;'
-                'border-top:1px solid var(--grid)">הכספת</h2>'
-                f'<p class="note" style="margin:-4px 0 10px">{total} ערכים שמורים '
-                f'ולא נטענים לסביבה של אף תהליך. שליפה: '
-                f'<code>secretbox.py --run KEY -- פקודה</code></p>' + "".join(rows))
+                '<h2 class="sec">הכספת</h2>'
+                f'<p class="note" style="margin:-4px 2px 12px">{total} ערכים שמורים, '
+                f'לא נטענים לסביבה של אף תהליך. 🔓 חושף ומעתיק ערך. '
+                f'שליפה בשורת פקודה: <code>secretbox.py --run KEY -- פקודה</code></p>' + "".join(rows))
 
         pages = load_pages()
         if pages:
@@ -615,8 +653,7 @@ border-top:1px solid var(--grid)">סוד חדש</h2>
                    if p.get("password") else "")
                 + "</div>"
                 for p in pages)
-            cards.append('<h2 style="font-size:1.05rem;margin:26px 0 10px;'
-                         'padding-top:16px;border-top:1px solid var(--grid)">הדפים שלנו</h2>' + rows)
+            cards.append('<h2 class="sec">הדפים שלנו</h2>' + rows)
 
         body = PAGE.replace("__CARDS__", "".join(cards)).replace(
             "__MSG__", f'<div class="msg">{msg}</div>' if msg else "")
