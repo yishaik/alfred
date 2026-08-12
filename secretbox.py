@@ -488,6 +488,7 @@ def verify(slot: dict, value: str) -> tuple[bool, str]:
 
 PAGE = """<!DOCTYPE html><html lang="he" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta http-equiv="Cache-Control" content="no-store, must-revalidate">
 <meta name="theme-color" content="#0b0f19"><title>Secretbox</title><style>
 :root{color-scheme:light dark;
 --bg:#f5f6f8;--s:#ffffff;--s2:#f8f9fb;--ink:#101828;--ink2:#475467;--mut:#98a2b3;
