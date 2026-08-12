@@ -656,14 +656,18 @@ class Handler(BaseHTTPRequestHandler):
             "var m=r.dataset.k.indexOf(v)>-1;r.style.display=m?'':'none';if(m)any=true;});"
             "g.style.display=any?'':'none';if(v)g.open=true;});\">")
 
-        # Group 1 — alfred's own .env-backed slots, in the SAME row style as the
-        # vault. reveal_ref is the bare KEY (resolve() finds it in .env);
-        # set_ref 'slot:KEY' routes the update through verify + write_secret.
-        core = "".join(
-            self._key_row(slot["label"], key, f"slot:{key}", read_current(slot),
+        # Group 1 — alfred's own .env-backed secrets. Shown by their raw env
+        # name (not a friendly label) so a key is a key, no visual "types". Only
+        # populated ones appear: an empty slot is not a secret, so it is not
+        # listed. reveal_ref is the bare KEY (resolve() finds it in .env);
+        # set_ref 'slot:KEY' routes an update through verify + write_secret.
+        core_rows = [
+            self._key_row(key, key, f"slot:{key}", cur,
                           slot.get("note", ""), slot.get("prefix", ""))
-            for key, slot in all_slots().items())
-        cards.append(self._group("ליבת אלפרד", len(all_slots()), core, is_open=True))
+            for key, slot in all_slots().items()
+            if (cur := read_current(slot))]
+        if core_rows:
+            cards.append(self._group("ליבת אלפרד", len(core_rows), "".join(core_rows), is_open=True))
 
         # Groups 2..N — every vault project, identical row style.
         vault = load_vault()
