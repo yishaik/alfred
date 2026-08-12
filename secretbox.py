@@ -499,23 +499,23 @@ PAGE = """<!DOCTYPE html><html lang="he" dir="rtl"><head><meta charset="utf-8">
 --chip:#1b2233;--chip-ink:#aeb8ff}}
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
-body{margin:0;padding:max(20px,env(safe-area-inset-top)) 16px 64px;background:var(--bg);
-color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;line-height:1.55;
--webkit-font-smoothing:antialiased}
-.w{max-width:640px;margin:0 auto}
-header{display:flex;align-items:center;gap:12px;margin:4px 0 6px}
-.lock{width:40px;height:40px;flex:none;border-radius:11px;background:var(--acc);color:var(--acc-ink);
-display:grid;place-items:center;font-size:1.15rem;box-shadow:0 2px 8px rgba(79,70,229,.28)}
-h1{font-size:1.35rem;margin:0;letter-spacing:-.01em;font-weight:700}
-.sub{color:var(--ink2);font-size:.84rem;margin:1px 0 0}
-.banner{display:flex;gap:9px;align-items:flex-start;background:var(--s);border:1px solid var(--ring);
-border-radius:12px;padding:11px 13px;margin:16px 0 22px;font-size:.82rem;color:var(--ink2)}
+body{margin:0;padding:max(14px,env(safe-area-inset-top)) 12px 44px;background:var(--bg);
+color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;line-height:1.5;
+-webkit-font-smoothing:antialiased;font-size:15px}
+.w{max-width:600px;margin:0 auto}
+header{display:flex;align-items:center;gap:10px;margin:2px 0 4px}
+.lock{width:32px;height:32px;flex:none;border-radius:9px;background:var(--acc);color:var(--acc-ink);
+display:grid;place-items:center;font-size:.95rem;box-shadow:0 2px 6px rgba(79,70,229,.25)}
+h1{font-size:1.12rem;margin:0;letter-spacing:-.01em;font-weight:700}
+.sub{color:var(--ink2);font-size:.78rem;margin:0}
+.banner{display:flex;gap:8px;align-items:flex-start;background:var(--s);border:1px solid var(--ring);
+border-radius:11px;padding:9px 11px;margin:12px 0 8px;font-size:.76rem;color:var(--ink2);line-height:1.45}
 .banner .i{flex:none;opacity:.7}
-.sec{font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;
-color:var(--mut);margin:28px 2px 11px;display:flex;align-items:center;gap:10px}
+.sec{font-size:.68rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase;
+color:var(--mut);margin:20px 2px 9px;display:flex;align-items:center;gap:9px}
 .sec::after{content:"";flex:1;height:1px;background:var(--grid)}
-.card{background:var(--s);border:1px solid var(--ring);border-radius:14px;padding:15px 16px;
-margin-bottom:11px;box-shadow:0 1px 2px rgba(16,24,40,.04);transition:border-color .15s}
+.card{background:var(--s);border:1px solid var(--ring);border-radius:12px;padding:13px 14px;
+margin-bottom:9px;box-shadow:0 1px 2px rgba(16,24,40,.04);transition:border-color .15s}
 .card:focus-within{border-color:var(--acc)}
 .hd{display:flex;justify-content:space-between;align-items:center;gap:8px}
 .hd b{font-size:.98rem;font-weight:600;display:flex;align-items:center;gap:7px}
@@ -524,11 +524,11 @@ border:1px solid var(--grid);border-radius:999px;padding:2px 9px}
 .note{font-size:.82rem;color:var(--ink2);margin:6px 0 11px}
 .fp{font-family:ui-monospace,SFMono-Regular,monospace;font-size:.74rem;color:var(--mut);
 margin-top:2px;word-break:break-all}
-input{width:100%;padding:12px 13px;font-size:16px;border:1px solid var(--grid);border-radius:10px;
+input{width:100%;padding:10px 12px;font-size:16px;border:1px solid var(--grid);border-radius:9px;
 background:var(--s2);color:var(--ink);font-family:ui-monospace,monospace;transition:border-color .15s,box-shadow .15s}
 input:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 22%,transparent)}
-button{margin-top:10px;width:100%;min-height:44px;padding:11px;font-size:.95rem;font-weight:600;
-border:none;border-radius:10px;background:var(--acc);color:var(--acc-ink);cursor:pointer;
+button{margin-top:9px;width:100%;min-height:42px;padding:10px;font-size:.92rem;font-weight:600;
+border:none;border-radius:9px;background:var(--acc);color:var(--acc-ink);cursor:pointer;
 transition:filter .15s,transform .05s}
 button:hover{filter:brightness(1.06)}button:active{transform:translateY(1px)}
 a{color:var(--acc);font-size:.82rem;text-decoration:none}a:hover{text-decoration:underline}
@@ -550,36 +550,35 @@ border-radius:999px;padding:4px 6px 4px 11px;font-family:ui-monospace,monospace;
 .chip button{all:unset;cursor:pointer;padding:0 4px;line-height:1;border-radius:999px;color:inherit}
 .chip button:hover{filter:brightness(1.15)}
 .search{margin:0 0 16px;font-family:inherit}
-.grp{background:var(--s);border:1px solid var(--ring);border-radius:14px;margin-bottom:11px;
+.grp{background:var(--s);border:1px solid var(--ring);border-radius:12px;margin-bottom:8px;
 box-shadow:0 1px 2px rgba(16,24,40,.04);overflow:hidden}
-.grp>summary{list-style:none;display:flex;align-items:center;gap:9px;padding:14px 16px;cursor:pointer}
+.grp>summary{list-style:none;display:flex;align-items:center;gap:8px;padding:11px 13px;cursor:pointer}
 .grp>summary::-webkit-details-marker{display:none}
-.grp>summary::after{content:"›";margin-inline-start:auto;color:var(--mut);font-size:1.15rem;
+.grp>summary::after{content:"›";margin-inline-start:auto;color:var(--mut);font-size:1.05rem;
 transition:transform .15s}
 .grp[open]>summary::after{transform:rotate(90deg)}
-.grp>summary .glock{width:26px;height:26px;flex:none;border-radius:8px;background:var(--chip);
-color:var(--chip-ink);display:grid;place-items:center;font-size:.8rem}
-.grp>summary b{font-weight:600;font-size:.95rem}
-.grp>summary .st{margin-inline-start:0}
+.grp>summary .glock{width:22px;height:22px;flex:none;border-radius:7px;background:var(--chip);
+color:var(--chip-ink);display:grid;place-items:center;font-size:.72rem}
+.grp>summary b{font-weight:600;font-size:.9rem}
+.grp>summary .st{margin-inline-start:0;font-size:.68rem;padding:1px 8px}
 .grows{border-top:1px solid var(--grid)}
-.krow{padding:11px 14px;border-bottom:1px solid var(--grid)}
+.krow{padding:8px 13px;border-bottom:1px solid var(--grid)}
 .krow:last-child{border-bottom:none}
-.kmain{display:flex;align-items:center;gap:10px}
-.klock{flex:none;color:var(--mut);font-size:.9rem;opacity:.85}
+.kmain{display:flex;align-items:center;gap:9px}
+.klock{flex:none;color:var(--mut);font-size:.8rem;opacity:.8}
 .kcol{flex:1;min-width:0}
-.kname{display:block;font-family:ui-monospace,monospace;font-size:.86rem;font-weight:600;
+.kname{display:block;font-family:ui-monospace,monospace;font-size:.8rem;font-weight:600;
 white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.kfp{display:block;font-family:ui-monospace,monospace;font-size:.7rem;color:var(--mut);
-white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.kacts{flex:none;display:flex;align-items:center;gap:2px}
-.icon{all:unset;box-sizing:border-box;cursor:pointer;width:34px;height:34px;border-radius:8px;
-display:grid;place-items:center;font-size:1rem;color:var(--ink2);transition:background .15s}
+.kfp{display:block;font-family:ui-monospace,monospace;font-size:.66rem;color:var(--mut);
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.kacts{flex:none;display:flex;align-items:center;gap:0}
+.icon{all:unset;box-sizing:border-box;cursor:pointer;width:32px;height:32px;border-radius:8px;
+display:grid;place-items:center;font-size:.95rem;color:var(--ink2);transition:background .15s}
 .icon:hover{background:var(--s2)}
 .ib{display:inline;margin:0}
-.keditor{display:flex;gap:8px;margin-top:10px}
+.keditor{display:flex;gap:7px;margin-top:9px}
 .keditor[hidden]{display:none}
-.keditor input{flex:1}.keditor button{margin-top:0;width:auto;padding:0 16px;white-space:nowrap}
-.knote{font-size:.76rem;color:var(--mut);margin-top:6px;padding-inline-start:26px}
+.keditor input{flex:1}.keditor button{margin-top:0;width:auto;padding:0 15px;white-space:nowrap;min-height:38px}
 </style></head><body><div class="w">
 <header><div class="lock">🔒</div><div><h1>Secretbox</h1>
 <p class="sub">כספת הסודות של אלפרד</p></div></header>
@@ -636,8 +635,7 @@ class Handler(BaseHTTPRequestHandler):
                 f'<span class="dot {dot}"></span>'
                 f'<span class="kacts">{reveal}'
                 f'<button class="icon" type="button" title="עדכן/החלף" {toggle}>✎</button>'
-                f'</span></div>{editor}'
-                + (f'<div class="knote">{esc(note)}</div>' if note else '') + '</div>')
+                f'</span></div>{editor}</div>')
 
     def _group(self, title, count, rows, is_open=False):
         return (f'<details class="grp"{" open" if is_open else ""}><summary>'
