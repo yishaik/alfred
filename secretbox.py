@@ -662,7 +662,7 @@ class Handler(BaseHTTPRequestHandler):
         # listed. reveal_ref is the bare KEY (resolve() finds it in .env);
         # set_ref 'slot:KEY' routes an update through verify + write_secret.
         core_rows = [
-            self._key_row(key, key, f"slot:{key}", cur,
+            self._key_row(key, f"slot:{key}", f"slot:{key}", cur,
                           slot.get("note", ""), slot.get("prefix", ""))
             for key, slot in all_slots().items()
             if (cur := read_current(slot))]
@@ -784,7 +784,15 @@ class Handler(BaseHTTPRequestHandler):
         self._render_reveal(unquote(ref).strip("/"), who)
 
     def _render_reveal(self, ref: str, who: str):
-        val, where, ambiguous = resolve(ref)
+        # A 'slot:KEY' ref is an alfred-core secret: read it exactly the way the
+        # page reads it (read_current handles env-line, file-kind, and non-.env
+        # paths) — resolve() only knows the main .env and would miss those.
+        if ref.startswith("slot:"):
+            slot = all_slots().get(ref[5:])
+            val = read_current(slot) if slot else None
+            where, ambiguous = "env", []
+        else:
+            val, where, ambiguous = resolve(ref)
         if ambiguous:
             self._render(f"⚠️ <b>{esc(ref)}</b> קיים בכמה פרויקטים: {esc(', '.join(ambiguous))}. ציין PROJECT/KEY.")
             return
