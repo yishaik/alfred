@@ -724,11 +724,19 @@ border-top:1px solid var(--grid)">סוד חדש</h2>
                 "<body style='font-family:system-ui;background:#0b0f14;color:#e6edf3;"
                 "max-width:32rem;margin:2rem auto;padding:1rem'>"
                 f"<p style='color:#8b98a5'>🔓 {esc(ref)} · <span style='font-size:.8rem'>{esc(where)}</span></p>"
-                "<textarea readonly onclick='this.select()' style='width:100%;height:5rem;"
+                "<textarea id='v' readonly onclick='this.select()' style='width:100%;height:5rem;"
                 "background:#111823;color:#e6edf3;border:1px solid #2a3644;border-radius:8px;"
                 f"padding:.6rem;font-family:monospace;font-size:.9rem'>{esc(val)}</textarea>"
+                "<button id='c' style='margin-top:8px;background:#1d6feb;color:#fff;border:0;"
+                "border-radius:8px;padding:.55rem 1rem;cursor:pointer;font-size:.9rem'>📋 העתק</button>"
                 "<p style='color:#8b98a5;font-size:.8rem'>ההצגה תועדה ונשלחה התראה. אל תשאיר/י את הדף פתוח.</p>"
-                "<a href='/secrets' style='color:#58a6ff'>← חזרה</a></body>")
+                "<a href='/secrets' style='color:#58a6ff'>← חזרה</a>"
+                "<script>document.getElementById('c').onclick=async function(){"
+                "var t=document.getElementById('v');var s=t.value;"
+                "try{await navigator.clipboard.writeText(s);}"
+                "catch(e){t.select();document.execCommand('copy');}"
+                "this.textContent='✓ הועתק';var b=this;setTimeout(function(){b.textContent='📋 העתק';},1500);"
+                "};</script></body>")
         data = page.encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
