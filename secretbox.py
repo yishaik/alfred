@@ -584,9 +584,13 @@ border-top:1px solid var(--grid)">סוד חדש</h2>
             for pname, p in projs.items():
                 keys = sorted(k for k, e in p["entries"].items() if "value" in e)
                 live = sum(1 for e in p["entries"].values() if e.get("status") == "live")
-                key_links = ", ".join(
-                    f'{esc(k)} <a href="/reveal/{esc(pname)}/{esc(k)}" '
-                    f'style="color:#58a6ff;text-decoration:none" title="הצג ותעד">🔓</a>'
+                key_links = " ".join(
+                    f'<span style="white-space:nowrap">{esc(k)}'
+                    f'<form method="POST" action="" style="display:inline">'
+                    f'<input type="hidden" name="reveal" value="{esc(pname)}/{esc(k)}">'
+                    f'<button type="submit" title="הצג ותעד" style="background:none;border:0;'
+                    f'color:#58a6ff;cursor:pointer;padding:0 8px 0 2px;font-size:1em">🔓</button>'
+                    f'</form></span>'
                     for k in keys)
                 rows.append(
                     f'<details class="card"><summary style="cursor:pointer">'
@@ -671,19 +675,27 @@ border-top:1px solid var(--grid)">סוד חדש</h2>
             return
         self._render()
 
-    def _reveal(self, ref: str):
-        from urllib.parse import unquote
-        # STRICTER than the rest of the page: reveal surfaces a raw value, so it
-        # must never use the localhost identity fail-open. Only a human arriving
-        # through `tailscale serve` (which sets Tailscale-User-Login) may reveal —
-        # a header-less 127.0.0.1 request, i.e. any agent/script on this box, is
-        # refused. This is what keeps the reveal path from becoming the CLI --get
-        # the whole design forbids.
+    def _reveal_identity(self) -> str | None:
+        """STRICTER than the rest of the page: reveal surfaces a raw value, so it
+        must never use the localhost identity fail-open. Only a human arriving
+        through `tailscale serve` (which sets Tailscale-User-Login) may reveal —
+        a header-less 127.0.0.1 request, i.e. any agent/script on this box, is
+        refused. This is what keeps reveal from becoming the CLI --get the whole
+        design forbids. Returns the login on success, else None."""
         who = self.headers.get("Tailscale-User-Login", "")
         if not who or (EXPECT_LOGIN and not token_eq(who, EXPECT_LOGIN)):
+            return None
+        return who
+
+    def _reveal(self, ref: str):
+        from urllib.parse import unquote
+        who = self._reveal_identity()
+        if not who:
             self.send_error(403, "reveal requires a tailnet identity")
             return
-        ref = unquote(ref).strip("/")
+        self._render_reveal(unquote(ref).strip("/"), who)
+
+    def _render_reveal(self, ref: str, who: str):
         val, where, ambiguous = resolve(ref)
         if ambiguous:
             self._render(f"⚠️ <b>{esc(ref)}</b> קיים בכמה פרויקטים: {esc(', '.join(ambiguous))}. ציין PROJECT/KEY.")
@@ -772,6 +784,18 @@ border-top:1px solid var(--grid)">סוד חדש</h2>
         form = parse_qs(self.rfile.read(n).decode())
         key = (form.get("slot") or [""])[0]
         value = (form.get("value") or [""])[0].strip()
+
+        # Reveal as a same-URL POST (an absolute GET link like /reveal/… escapes
+        # the /secrets mount and lands on the wrong app — the exact trap the
+        # do_POST comment above describes). Reuses the strict reveal identity.
+        reveal_ref = (form.get("reveal") or [""])[0].strip()
+        if reveal_ref:
+            who = self._reveal_identity()
+            if not who:
+                self.send_error(403, "reveal requires a tailnet identity")
+                return
+            self._render_reveal(reveal_ref, who)
+            return
 
         if key == "__new__":
             name = (form.get("name") or [""])[0].strip()
