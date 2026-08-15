@@ -144,17 +144,29 @@ async def post_init(app):
     except Exception:
         pass
     s = await m.session_for_agent(m.active)
+    if s.thread_id:
+        try:
+            await app.bot.unhide_general_forum_topic(CHAT_ID)
+        except Exception:
+            log.debug("unhide General topic skipped", exc_info=True)
     try:
+        # Reply keyboards are chat-wide and Telegram hides General when one is
+        # posted into a Topics-enabled private chat. Keep the persistent bar
+        # only until Topics is on; after that the inline panel is enough.
+        online_kb = None if s.thread_id else handlers.quick_kb()
         await app.bot.send_message(
             CHAT_ID,
             f"🎩 Alfred online · agent {m.active} · "
             f"cwd {s.cfg.workdir} · model {s.model or 'default'}\n"
             "Type to chat · /panel for controls · ✨ Features for the rest.",
-            reply_markup=handlers.quick_kb())
+            reply_markup=online_kb,
+            message_thread_id=s.thread_id)
         # The panel goes in a second message: a reply keyboard and an inline
         # keyboard cannot ride on the same one, and the persistent bar is the
         # thing that has to survive — it is what stays under the composer.
-        await app.bot.send_message(CHAT_ID, "controls:", reply_markup=handlers.panel_kb(s))
+        await app.bot.send_message(
+            CHAT_ID, "controls:", reply_markup=handlers.panel_kb(s),
+            message_thread_id=s.thread_id)
     except Exception:
         log.exception("online message failed")
     # a deliberate restart (restart.ps1) leaves this flag; a crash-respawn does

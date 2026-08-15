@@ -50,9 +50,29 @@ def _from_bot(msg) -> bool:
     return bool(msg and msg.from_user and msg.from_user.is_bot)
 
 
+def _route_thread_id(msg) -> int | None:
+    """Forum / private-Topics thread id, or None for a plain unthreaded chat.
+
+    Telegram still sets message_thread_id on ordinary reply chains. Those are
+    not Topics and must not be treated as a delivery target — posting into a
+    reply-chain id creates a hidden thread and makes General disappear.
+    """
+    if not msg:
+        return None
+    if getattr(msg, "is_topic_message", None):
+        return msg.message_thread_id
+    topic = getattr(msg, "direct_messages_topic", None)
+    if topic is not None and getattr(topic, "topic_id", None):
+        return topic.topic_id
+    chat = getattr(msg, "chat", None)
+    if chat is not None and getattr(chat, "is_forum", False):
+        return msg.message_thread_id
+    return None
+
+
 def _route(update: Update) -> tuple[int, int | None]:
     msg = update.effective_message
-    return update.effective_chat.id, msg.message_thread_id if msg else None
+    return update.effective_chat.id, _route_thread_id(msg)
 
 
 async def _session(update: Update, ctx):
@@ -318,6 +338,13 @@ async def cmd_brainbot(update: Update, ctx):
     if not needs_creation():
         await update.message.reply_text("🧠 בוט ה־Second Brain כבר הוגדר.")
         return
+    s = await _session(update, ctx)
+    if s.thread_id:
+        await update.message.reply_text(
+            "Threaded mode is on — Telegram only offers bot creation as a "
+            "reply keyboard, which hides the General topic. Turn Topics off "
+            "in this chat (or use a non-Topics chat) and run /brainbot again.")
+        return
     await update.message.reply_text(
         "לחץ על הכפתור — Telegram ייצור ויחבר את הבוט אוטומטית:",
         reply_markup=request_keyboard())
@@ -352,8 +379,11 @@ async def on_managed_bot_created(update: Update, ctx):
         "✅ מוכן. הבוט מחפש ומסביר, קולט לינקים דרך X Reader, מטמיע אותם "
         "ומעדכן את אתר here.now.", reply_markup=kb)
     # one_time_keyboard hides the request button but does NOT bring back what
-    # it replaced, so the composer would be left bare. Put the bar back.
-    await update.message.reply_text("↩️", reply_markup=quick_kb())
+    # it replaced, so the composer would be left bare. Put the bar back —
+    # unless Topics is on, where a reply keyboard hides General.
+    s = await _session(update, ctx)
+    if not s.thread_id:
+        await update.message.reply_text("↩️", reply_markup=quick_kb())
 
 
 async def cmd_panel(update: Update, ctx):
@@ -1481,7 +1511,7 @@ async def on_edited(update: Update, ctx):
     if _from_bot(msg):   # anti-loop: ignore edits authored by another bot
         return
     s = await mgr(ctx).session_for_route(update.effective_chat.id,
-                                         msg.message_thread_id)
+                                         _route_thread_id(msg))
     if msg.message_id == s.last_user_msg_id and s.busy:
         await s.interrupt()
         await s.feed(f"[the user corrected their message; use this version instead] "
@@ -1642,8 +1672,7 @@ async def on_callback(update: Update, ctx):
         await _session_cb(q, s, tag, parts[2:])
         return
 
-    chat_id, thread_id = update.effective_chat.id, \
-        q.message.message_thread_id if q.message else None
+    chat_id, thread_id = update.effective_chat.id, _route_thread_id(q.message)
     s = await m.session_for_route(chat_id, thread_id)
 
     if data.startswith("send:"):

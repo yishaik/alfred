@@ -53,6 +53,26 @@ def job_skey(agent: str, chat_id: int | None, thread_id: int | None) -> str:
     return f"{agent}@p"
 
 
+def resolve_route(chat_id: int, thread_id: int | None, *,
+                  owner_id: int, topics: dict[str, str], active: str,
+                  private_thread_id: int | None = None
+                  ) -> tuple[str, str, int | None]:
+    """Map an inbound Telegram route to (agent, session key, delivery thread).
+
+    Private-chat Topics keep the primary session so the conversation is not
+    split, but the delivery thread must stay set — sending without
+    message_thread_id in a Topics chat lands *outside* the topic list and
+    Telegram hides General."""
+    if chat_id != owner_id:
+        tid = thread_id or 0
+        agent = topics.get(str(tid), active)
+        return agent, f"{agent}@t{tid}", thread_id
+    if thread_id and str(thread_id) in topics:
+        agent = topics.get(str(thread_id), active)
+        return agent, f"{agent}@t{thread_id}", thread_id
+    return active, f"{active}@p", thread_id or private_thread_id
+
+
 class AgentManager:
     def __init__(self, app):
         self.app = app
@@ -69,6 +89,11 @@ class AgentManager:
         self.session_ids: dict[str, str] = load_json(SESSIONS_FILE, {})
         self._migrate_legacy()
         self.topics: dict[str, str] = load_json(TOPICS_FILE, {})  # thread_id -> agent
+        # Last known Topics thread in the private chat. Telegram hides General
+        # when the bot posts without message_thread_id after Topics is on.
+        raw_tid = raw.get("private_thread_id")
+        self.private_thread_id: int | None = int(raw_tid) if raw_tid else None
+        self._cleared_topic_keyboard = False
         self._prune_orphan_sessions()
         self.costs: dict[str, float] = load_json(COSTS_FILE, {})
         # Long-term memory is now a per-agent Napkin vault (state/kb/<agent>/),
@@ -136,6 +161,7 @@ class AgentManager:
     def save_agents(self):
         save_json(AGENTS_FILE, {
             "active": self.active,
+            "private_thread_id": self.private_thread_id,
             "agents": {n: c.to_dict() for n, c in self.agents.items()}})
 
     def save_session_id(self, skey: str, session_id: str | None):
@@ -264,29 +290,68 @@ class AgentManager:
             s.schedule_reconnect()
         return s
 
+    def remember_private_thread(self, thread_id: int | None) -> None:
+        """Keep the private-chat Topics id so later unthreaded sends stay in it.
+
+        Bound /bind topics have their own session and must not steal this —
+        otherwise a job or restart notice would land in that topic."""
+        if thread_id and str(thread_id) not in self.topics:
+            if self.private_thread_id != thread_id:
+                self.private_thread_id = thread_id
+                self.save_agents()
+            self._maybe_clear_topic_keyboard()
+
+    def _maybe_clear_topic_keyboard(self) -> None:
+        """A leftover reply keyboard hides General in a Topics chat. Drop it."""
+        if self._cleared_topic_keyboard or not self.private_thread_id:
+            return
+        self._cleared_topic_keyboard = True
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def _go():
+            from telegram import ReplyKeyboardRemove
+            try:
+                await self.bot.unhide_general_forum_topic(CHAT_ID)
+            except Exception:
+                log.debug("unhide General topic skipped", exc_info=True)
+            try:
+                await self.bot.send_message(
+                    CHAT_ID, "🧵 Topics on — using the inline /panel now.",
+                    reply_markup=ReplyKeyboardRemove(),
+                    message_thread_id=self.private_thread_id)
+            except Exception:
+                log.debug("could not clear Topics reply keyboard", exc_info=True)
+
+        loop.create_task(_go())
+
+    def _attach_thread(self, s: AgentSession, thread_id: int | None) -> AgentSession:
+        """Reuse a live session but retarget its Telegram delivery thread."""
+        if thread_id and s.thread_id != thread_id:
+            s.thread_id = thread_id
+            s.outbox.thread_id = thread_id
+        return s
+
     async def session_for_route(self, chat_id: int,
                                 thread_id: int | None) -> AgentSession:
-        if chat_id != CHAT_ID:
-            # forum supergroup: every topic (incl. General, thread None) is its
-            # own conversation; /bind picks which agent config it runs
-            tid = thread_id or 0
-            agent = self.topics.get(str(tid), self.active)
-            return await self._get_session(agent, f"{agent}@t{tid}",
-                                           chat_id, thread_id)
-        # private chat with native bot threads: a thread that's been /bind-ed gets
-        # its OWN session+context; the main/General thread (and any unbound thread)
-        # stays on the primary session so the ongoing conversation is never split.
-        if thread_id and str(thread_id) in self.topics:
-            agent = self.topics.get(str(thread_id), self.active)
-            return await self._get_session(agent, f"{agent}@t{thread_id}",
-                                           chat_id, thread_id)
-        agent = self.active
-        return await self._get_session(agent, f"{agent}@p", chat_id, None)
+        if chat_id == CHAT_ID:
+            self.remember_private_thread(thread_id)
+        agent, skey, deliver_tid = resolve_route(
+            chat_id, thread_id, owner_id=CHAT_ID, topics=self.topics,
+            active=self.active, private_thread_id=self.private_thread_id)
+        s = self.sessions.get(skey)
+        if s:
+            return self._attach_thread(s, deliver_tid)
+        return await self._get_session(agent, skey, chat_id, deliver_tid)
 
     async def session_for_agent(self, name: str) -> AgentSession:
         """Private-chat session for a named agent (used for bot-to-bot and
         scheduler deliveries when no topic session exists)."""
-        return await self._get_session(name, f"{name}@p", CHAT_ID, None)
+        s = await self._get_session(name, f"{name}@p", CHAT_ID,
+                                    self.private_thread_id)
+        return self._attach_thread(s, self.private_thread_id)
 
     async def _notify_misroute(self, text: str) -> None:
         """Warn about a scheduled-job routing fallback, deduped so a daily job
@@ -324,7 +389,9 @@ class AgentManager:
                 f"נשלח לצ׳אט הפרטי של <b>{agent}</b>.")
             skey = f"{agent}@p"
         if skey.endswith("@p"):
-            return await self._get_session(agent, skey, CHAT_ID, None)
+            s = await self._get_session(agent, skey, CHAT_ID,
+                                        self.private_thread_id)
+            return self._attach_thread(s, self.private_thread_id)
         return await self._get_session(agent, skey, chat_id, thread_id)
 
     def find_by_sid(self, sid: int) -> AgentSession | None:
