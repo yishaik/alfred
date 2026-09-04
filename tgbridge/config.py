@@ -341,6 +341,20 @@ def authorized_chat(chat_id: int) -> bool:
     return chat_id == CHAT_ID or (GROUP_ID and chat_id == GROUP_ID)
 
 
+# Per-USER privilege. authorized_chat is chat-level: in a GROUP_ID forum every
+# member could /restart, change the cwd or flip auto-approve. Privileged
+# commands and buttons additionally require the user to be an admin. Default:
+# the owner (a private chat id IS the owner's user id).
+ADMIN_IDS: frozenset[int] = frozenset(
+    int(x) for x in os.environ.get("BRIDGE_ADMIN_IDS", "").replace(";", ",").split(",")
+    if x.strip().lstrip("-").isdigit()
+) or (frozenset({CHAT_ID}) if CHAT_ID > 0 else frozenset())
+
+
+def is_admin(user_id: int | None) -> bool:
+    return not ADMIN_IDS or (user_id is not None and user_id in ADMIN_IDS)
+
+
 import re as _re
 
 _DANGEROUS_WORKDIRS = [

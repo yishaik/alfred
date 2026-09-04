@@ -16,6 +16,7 @@ Stdlib only. Same house style as secretbox.py and the understudy dashboard.
 """
 import hmac
 import json
+import secrets as _secrets
 import os
 import subprocess
 import tempfile
@@ -192,7 +193,7 @@ def render(d, tasks, msg=""):
         toggle = ("" if t.get("check") else
                   f'<button name="act" value="{"reopen" if done else "done"}">'
                   f'{"החזר לפתוח" if done else "סמן כבוצע"}</button>')
-        btn = (f'<form method="POST" style="margin:0"><input type="hidden" name="id" value="{t["id"]}">'
+        btn = (f'<form method="POST" style="margin:0">{CSRF_FIELD}<input type="hidden" name="id" value="{t["id"]}">'
                f'{toggle}<button name="act" value="del" class="del" '
                f'onclick="return confirm(\'למחוק את המשימה?\')">מחק</button></form>')
         return (f'<div class="task{" dn" if done else ""}">'
@@ -277,7 +278,7 @@ a{{color:var(--acc)}}
 
 <h2>משימות פתוחות · {len(open_t)}</h2>
 <form method="POST" class="add">
-<input type="hidden" name="act" value="add">
+{CSRF_FIELD}<input type="hidden" name="act" value="add">
 <input name="title" placeholder="משימה חדשה" required maxlength="120">
 <input name="detail" placeholder="פרטים (לא חובה)" maxlength="300">
 <div class="arow">
@@ -305,6 +306,12 @@ a{{color:var(--acc)}}
 {"".join(task_card(t) for t in done_t) or '<div class="task">עדיין כלום</div>'}
 
 </div></body></html>"""
+
+
+# Per-process CSRF token — same reasoning as secretbox: the tailnet identity
+# proves who, not intent. Every form carries it; do_POST verifies.
+CSRF_TOKEN = _secrets.token_urlsafe(24)
+CSRF_FIELD = f'<input type="hidden" name="csrf" value="{CSRF_TOKEN}">'
 
 
 class H(BaseHTTPRequestHandler):
@@ -354,6 +361,9 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0) or 0)
         form = parse_qs(self.rfile.read(min(n, 8192)).decode())
+        if not hmac.compare_digest((form.get("csrf") or [""])[0], CSRF_TOKEN):
+            self.send_error(403, "stale or missing form token — reload the page")
+            return
         tid = (form.get("id") or [""])[0]
         act = (form.get("act") or [""])[0]
         tasks = load_tasks()

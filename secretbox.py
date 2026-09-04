@@ -15,6 +15,7 @@ Python stdlib only, matching the understudy dashboard's style.
 import hashlib
 import hmac
 import html
+import secrets as _secrets
 import json
 import os
 import re
@@ -396,6 +397,17 @@ def esc(s) -> str:
     return html.escape(str(s), quote=True)
 
 
+# Per-process CSRF token. The tailnet identity header proves WHO sent a
+# request, not that they meant to: a cross-site form on any page open in the
+# same browser would reach this app with the identity attached. Every mutating
+# form carries this and do_POST checks it. Restart -> reload the page.
+CSRF_TOKEN = _secrets.token_urlsafe(24)
+
+
+def csrf_field() -> str:
+    return f'<input type="hidden" name="csrf" value="{CSRF_TOKEN}">'
+
+
 def token_eq(a: str, b: str) -> bool:
     """Constant-time compare for anything bearer-shaped."""
     return bool(a) and bool(b) and hmac.compare_digest(a, b)
@@ -619,11 +631,11 @@ class Handler(BaseHTTPRequestHandler):
         dot = "ok" if cur else "no"
         fp = fingerprint(cur) if cur else "—"
         reveal = (f'<form method="POST" action="" class="ib">'
-                  f'<input type="hidden" name="reveal" value="{esc(reveal_ref)}">'
+                  f'{csrf_field()}<input type="hidden" name="reveal" value="{esc(reveal_ref)}">'
                   f'<button class="icon" title="חשוף והעתק">👁</button></form>') if cur else ''
         ph = f"צריך להתחיל ב-{prefix}" if prefix else ("עדכן ערך" if cur else "הדבק ערך חדש")
         editor = (f'<form method="POST" action="" class="keditor" hidden>'
-                  f'<input type="hidden" name="setkey" value="{esc(set_ref)}">'
+                  f'{csrf_field()}<input type="hidden" name="setkey" value="{esc(set_ref)}">'
                   f'<input type="password" name="value" placeholder="{esc(ph)}" '
                   f'autocomplete="new-password" spellcheck="false">'
                   f'<button type="submit">{"עדכן" if cur else "שמור"}</button></form>')
@@ -686,7 +698,7 @@ class Handler(BaseHTTPRequestHandler):
 <div class="note">תאר במילים שלך מה הסוד. אזהה את השירות לפי חתימת הערך, ואם לא — אבין מהתיאור.
 אם השם כבר קיים והערך שונה — לא נדרס: יישמר בשם חדש (אלא אם הישן כבר לא עובד).</div>
 <form method="POST" action="" autocomplete="off">
-<input type="hidden" name="slot" value="__new__">
+{csrf_field()}<input type="hidden" name="slot" value="__new__">
 <input name="name" placeholder="מה זה? למשל: הטוקן של טוויליו" required maxlength="120" style="margin-bottom:8px">
 <input name="project" placeholder="של איזה פרויקט? (לא חובה)" maxlength="60" style="margin-bottom:8px">
 <input type="password" name="value" placeholder="הערך" required
@@ -885,6 +897,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(413)
             return
         form = parse_qs(self.rfile.read(n).decode())
+        if not token_eq((form.get("csrf") or [""])[0], CSRF_TOKEN):
+            self.send_error(403, "stale or missing form token — reload the page")
+            return
         key = (form.get("slot") or [""])[0]
         value = (form.get("value") or [""])[0].strip()
 

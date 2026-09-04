@@ -269,10 +269,14 @@ def main():
     _disable_wmi_platform_lookup()
     rot = RotatingFileHandler(APP_LOG_FILE, maxBytes=5 * 1024 * 1024,
                               backupCount=3, encoding="utf-8")
+    # stderr reaches journald (see supervisor.py): keep it to WARNING+ so the
+    # journal is signal, while the rotating app log keeps the full INFO trail.
+    err = logging.StreamHandler()
+    err.setLevel(logging.WARNING)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        handlers=[logging.StreamHandler(), rot])
+        handlers=[err, rot])
     logging.getLogger("httpx").setLevel(logging.WARNING)
     if not BOT_TOKEN or not CHAT_ID:
         raise SystemExit(
@@ -372,7 +376,10 @@ def main():
     print(f"[bridge] starting — chat={CHAT_ID} group={GROUP_ID or '-'}")
     if not _await_dns():
         raise SystemExit(1)
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    # drop_pending_updates=True threw away every message sent while the
+    # bridge was down (silently). Keep the backlog: Telegram redelivers what we
+    # never acknowledged, and the session queue is persisted separately.
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False)
     # run_polling returns on a clean shutdown. handlers.exit_code is non-zero
     # only when a handler asked to stay down for a while (sustained getUpdates
     # conflict) — the supervisor reads the code and picks its restart delay.

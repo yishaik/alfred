@@ -19,6 +19,7 @@ wake to a tidy recap-and-plan instead of nothing. The agenda builder is pure
 and unit-tested; the manager runs the maintenance and sends the brief.
 """
 
+import os
 import re
 from pathlib import Path
 
@@ -26,7 +27,11 @@ from .digest import build_digest
 from .memory_dreaming import schedule_once
 
 AGENDA_HORIZON_S = 86400.0      # how far ahead the agenda looks (24h)
-BRAIN_RAW = Path("D:/projects/second-brain/raw")   # x-reader → Second Brain captures
+# x-reader -> Second Brain captures. Env-driven (BRAIN_ROOT, as x-reader uses)
+# with a sane default per OS; the old hardcoded D:/ path was dead on Linux.
+BRAIN_RAW = Path(os.environ.get("BRAIN_ROOT", "").strip()
+                 or ("D:/projects/second-brain" if os.name == "nt"
+                     else str(Path.home() / "git" / "second-brain"))) / "raw"
 
 
 def _front(text: str, key: str) -> str:

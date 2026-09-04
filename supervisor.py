@@ -65,9 +65,14 @@ def main():
             _note(fh, "launching bridge")
             start = time.monotonic()
             try:
+                # stdout (prints) -> bridge.log as before; stderr is left to
+                # the parent, i.e. journald under systemd. The app's logging
+                # goes to stderr (WARNING+) and to state/bridge-app.log (INFO),
+                # so `journalctl -u alfred` finally shows real errors instead
+                # of nothing (audit 2026-09-04: the journal was empty).
                 proc = subprocess.Popen(
                     [sys.executable, "-u", os.path.join(ROOT, "bridge.py")],
-                    stdout=fh, stderr=subprocess.STDOUT, cwd=ROOT)
+                    stdout=fh, stderr=None, cwd=ROOT)
                 rc = proc.wait()
             except KeyboardInterrupt:
                 try:

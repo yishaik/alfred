@@ -65,7 +65,63 @@ DANGER_PATTERNS: list[re.Pattern] = [re.compile(p, re.IGNORECASE) for p in [
     r"\bsudo\s+(rm|dd|mkfs|chown|chmod)\b",
     r"\bdd\b[^\n]*\bof=/dev/(disk|sd|nvme)",                   # raw device write
     r"\bdiskutil\s+(eraseDisk|eraseVolume|reformat)\b",
+    # --- exfiltration (added 2026-09-04: the list above was destruction-only,
+    # so under auto-approve an injected turn could ship .env anywhere unasked)
+    # secret files handed to a network client, by any of the usual flags
+    r"\b(curl|wget|nc|ncat|scp|rsync|sftp|ftp)\b[^\n]*"
+    r"(vault\.json|\.env\b|\.env-[a-z]|toolrpc\.token|grants\.json|"
+    r"secretbackup\.recipient|\.credentials\.json|\.ssh/|\.token-)",
+    r"\b(curl|wget)\b[^\n]*(-T\s|--upload-file\b|--data-binary\s+@|-d\s+@|-F\s+[^\s]*=@)",
+    # environment dumps (tokens live there) and echoing secret-shaped vars
+    r"(^|[;&|]\s*)(env|printenv|set)\s*($|[|>])",
+    r"/proc/(self|\d+)/environ",
+    r"\becho\b[^\n]*\$\{?[A-Z_]*(TOKEN|KEY|SECRET|PASSWORD)",
+    # pushing somewhere new
+    r"\bgit\s+remote\s+(add|set-url)\b",
+    r"\bgit\s+push\b[^\n]*https?://",
+    # reverse shells / raw sockets
+    r"\b(nc|ncat|bash|sh)\b[^\n]*(-e\s*/bin/|/dev/tcp/)",
 ] + EXTRA_DANGER_PATTERNS]
+
+# Files that must never be read by the agent, by any tool (CLAUDE.md: "never
+# cat .env or vault.json"). Matched against Bash commands AND the file_path /
+# path arguments of Read/Grep/Edit/Write/Glob, and denied outright — no tap.
+SECRET_PATH_RX = re.compile(
+    r"(^|[\s/'\"=])(vault\.json|\.env(-[A-Za-z0-9_]+)?|toolrpc\.token|grants\.json|"
+    r"secretbackup\.recipient|\.credentials\.json|\.token-[A-Za-z0-9_-]+|"
+    r"\.ssh/(id_[a-z0-9]+|authorized_keys|config)|\.netrc|\.pgpass|\.npmrc)"
+    r"(\s|$|['\"|;&)])", re.IGNORECASE)
+_READERS_RX = re.compile(
+    r"\b(cat|less|more|head|tail|grep|rg|sed|awk|strings|base64|xxd|od|hexdump|"
+    r"cp|mv|tee|python3?|node|jq|source|\.)\b", re.IGNORECASE)
+_PATH_TOOLS = ("Read", "Edit", "MultiEdit", "Write", "NotebookEdit", "Grep", "Glob")
+# state-changing tools that a bot-originated turn may not use without a tap
+PEER_GATED_TOOLS = frozenset((
+    "Bash", "PowerShell", "Write", "Edit", "MultiEdit", "NotebookEdit",
+    "mcp__bridge__message_agent", "mcp__bridge__schedule",
+    "mcp__bridge__unschedule", "mcp__bridge__forget", "mcp__bridge__send_file"))
+
+
+def is_forbidden(tool_name: str, tool_input: dict) -> str | None:
+    """A secret file about to be read/opened: return the reason, or None.
+    Hard deny (no Telegram tap): there is no legitimate reason for the agent
+    to see a credential value — secretbox --run exists for using one."""
+    if tool_name in ("Bash", "PowerShell"):
+        cmd = tool_input.get("command") or ""
+        # `secretbox.py --run FOO` legitimately names the key, never the file;
+        # only flag commands that both name a secret file and can read it.
+        if SECRET_PATH_RX.search(cmd) and _READERS_RX.search(cmd) \
+                and "secretbox.py" not in cmd:
+            return "reads a secret file"
+        return None
+    if tool_name in _PATH_TOOLS:
+        target = (tool_input.get("file_path") or tool_input.get("notebook_path")
+                  or tool_input.get("path") or "")
+        if tool_name == "Grep" and not target:
+            target = tool_input.get("pattern", "")
+        if target and SECRET_PATH_RX.search(" " + target.replace("\\", "/") + " "):
+            return "reads a secret file"
+    return None
 
 
 def is_dangerous(tool_name: str, tool_input: dict) -> str | None:
@@ -78,6 +134,34 @@ def is_dangerous(tool_name: str, tool_input: dict) -> str | None:
         if m:
             return m.group(0)
     return None
+
+
+# Token shapes we know; anything matching is masked before it hits a log.
+_SECRET_SHAPES = [re.compile(p) for p in (
+    r"sk-[A-Za-z0-9_-]{16,}",                     # OpenAI / Anthropic
+    r"sbp_[A-Za-z0-9]{20,}",                      # Supabase
+    r"gsk_[A-Za-z0-9]{20,}",                      # Groq
+    r"AIza[0-9A-Za-z_-]{30,}",                    # Google
+    r"gh[pousr]_[A-Za-z0-9]{30,}",                # GitHub
+    r"xox[abpr]-[A-Za-z0-9-]{20,}",               # Slack
+    r"\b\d{8,10}:[A-Za-z0-9_-]{35}\b",            # Telegram bot token
+    r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",  # JWT
+    r"(?i)bearer\s+[A-Za-z0-9._~+/=-]{16,}",
+    r"(?i)\b[A-Z0-9_]*(TOKEN|KEY|SECRET|PASSWORD)[A-Z0-9_]*=['\"]?[^\s'\"]{8,}",
+)]
+
+
+def redact(text: str) -> str:
+    """Mask credential-shaped substrings (keeps the first 4 chars as a hint)."""
+    def _mask(m):
+        v = m.group(0)
+        if "=" in v and v.upper().split("=", 1)[0].rstrip("'\"") == v.split("=", 1)[0].rstrip("'\"").upper():
+            k, _, _ = v.partition("=")
+            return f"{k}=***"
+        return v[:4] + "***"
+    for rx in _SECRET_SHAPES:
+        text = rx.sub(_mask, text)
+    return text
 
 
 def rotate_audit(path=None, max_bytes: int = 10 * 1024 * 1024,
@@ -106,7 +190,7 @@ def audit(agent: str, skey: str, tool: str, tool_input: dict,
             fh.write(json.dumps({
                 "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "agent": agent, "skey": skey, "tool": tool,
-                "summary": summarize_tool(tool, tool_input)[:300],
+                "summary": redact(summarize_tool(tool, tool_input))[:300],
                 "guarded": guarded, "decision": decision,
             }, ensure_ascii=False) + "\n")
     except Exception:
@@ -157,7 +241,30 @@ def build_hooks(session) -> dict:
         tool = input_data.get("tool_name", "?")
         tool_input = input_data.get("tool_input") or {}
         tracing.start(tool_use_id, tool, summarize_tool(tool, tool_input))
+        forbidden = is_forbidden(tool, tool_input)
+        if forbidden:
+            metrics.bump("guard_deny")
+            audit(session.cfg.name, session.skey, tool, tool_input,
+                  guarded=True, decision="deny-secret")
+            session.outbox.emit(f"⛔ blocked {tool}: {forbidden} "
+                                f"(`{redact(summarize_tool(tool, tool_input))[:120]}`)")
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason":
+                        "[bridge] credentials are never read directly. To USE "
+                        "a secret run the command through "
+                        "`python3 /home/ubuntu/alfred/secretbox.py --run KEY -- <cmd>`.",
+                }
+            }
         matched = is_dangerous(tool, tool_input)
+        # A turn that came from another agent (peer bus / bot message) is
+        # untrusted input; anything that changes state needs a human tap even
+        # under auto-approve. Read-only tools stay free.
+        if not matched and getattr(session, "turn_source", None) is not None \
+                and session.turn_source.kind == "bot" and tool in PEER_GATED_TOOLS:
+            matched = f"peer-originated turn ({session.turn_source.origin or 'bot'})"
         if not matched:
             audit(session.cfg.name, session.skey, tool, tool_input)
             return {}

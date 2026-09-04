@@ -210,7 +210,7 @@ _TIER_MAP = {"light": "haiku", "medium": "claude-sonnet-5", "heavy": "opus",
 
 # Forced tier prefixes -> Anthropic model id (claude path).
 _FORCE_TIER = {"!opus": "opus", "!sonnet": "claude-sonnet-5",
-               "!haiku": "haiku", "!fable": "claude-fable-5"}
+               "!haiku": "haiku", "!fable": "claude-fable-5-1"}
 
 # Forced EXTERNAL provider prefixes -> provider name (free path, pinned to ONE
 # provider). These are PAID via OpenRouter; opt-in only. A pinned external

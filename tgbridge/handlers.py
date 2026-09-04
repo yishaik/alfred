@@ -183,7 +183,7 @@ def model_kb(current: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(lbl("Opus 5", "claude-opus-5"), callback_data="model:claude-opus-5"),
          InlineKeyboardButton(lbl("Opus 4.8", "claude-opus-4-8"), callback_data="model:claude-opus-4-8")],
         [InlineKeyboardButton(lbl("Sonnet 5", "claude-sonnet-5"), callback_data="model:claude-sonnet-5"),
-         InlineKeyboardButton(lbl("Fable 5", "claude-fable-5"), callback_data="model:claude-fable-5"),
+         InlineKeyboardButton(lbl("Fable 5.1", "claude-fable-5-1"), callback_data="model:claude-fable-5-1"),
          InlineKeyboardButton(lbl("Haiku", "haiku"), callback_data="model:haiku")],
         [InlineKeyboardButton(lbl("Default", ""), callback_data="model:"),
          InlineKeyboardButton("🌐 חיצוניים", callback_data="menu:xmodel")],
@@ -736,8 +736,14 @@ async def cmd_secretary(update: Update, ctx):
 
 def _valid_dir(path: str) -> bool:
     import os
+    import re
     from .config import is_dangerous_workdir
     if is_dangerous_workdir(path):   # block drive roots, Windows, network shares
+        return False
+    # A Windows path on POSIX is not a path at all: os.makedirs happily creates
+    # a directory literally named "D:\projects\LinkedIn" (found on the Oracle
+    # box, 2026-09-04). Refuse it instead of manufacturing garbage.
+    if os.name != "nt" and (re.match(r"^[A-Za-z]:[\\/]", path) or "\\" in path):
         return False
     if os.path.isdir(path):
         return True
@@ -1700,6 +1706,34 @@ async def on_voice(update: Update, ctx):
 # --------------------------------------------------------------------------- #
 # Callbacks
 # --------------------------------------------------------------------------- #
+# buttons that change agent/bridge state: admin only (see config.is_admin)
+_PRIV_CB = ("act:restart", "act:auto", "act:secretary", "model:", "xmodel:",
+            "voi:", "agn", "ags:", "agr:", "agx:", "agX:", "rt:", "job:cancel:",
+            "feat:", "menu:router", "menu:agents")
+
+
+def _admin_user(update: Update) -> bool:
+    from .config import is_admin
+    u = update.effective_user
+    return bool(u) and is_admin(u.id)
+
+
+def admin_only(fn):
+    """Wrap a command handler so non-admin users in the group get a polite
+    refusal instead of the owner's controls."""
+    import functools
+
+    @functools.wraps(fn)
+    async def wrapped(update: Update, ctx):
+        if not _admin_user(update):
+            msg = update.effective_message
+            if msg:
+                await msg.reply_text("🔒 admin only")
+            return
+        return await fn(update, ctx)
+    return wrapped
+
+
 async def on_callback(update: Update, ctx):
     q = update.callback_query
     if not authorized_chat(update.effective_chat.id):
@@ -1707,6 +1741,9 @@ async def on_callback(update: Update, ctx):
         return
     m = mgr(ctx)
     data = q.data or ""
+    if data.startswith(_PRIV_CB) and not _admin_user(update):
+        await q.answer("🔒 admin only", show_alert=True)
+        return
     await q.answer()
 
     # session-scoped callbacks carry a sid: pm/qp/qt/qd/qo/bt/qq
@@ -2101,3 +2138,16 @@ async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE):
             CHAT_ID, f"⚠️ bridge error: {type(err).__name__}: {str(err)[:300]}")
     except Exception as e:
         log.debug("error notice send failed: %s", e)
+
+
+# Privileged commands: state-changing or sensitive. Applied here so main.py's
+# command table needs no change and any new handler added to this list is
+# gated the same way.
+for _name in ("cmd_restart", "cmd_stop", "cmd_kill", "cmd_newagent", "cmd_delagent",
+              "cmd_auto", "cmd_cwd", "cmd_bind", "cmd_engine", "cmd_model",
+              "cmd_models", "cmd_logs", "cmd_audit", "cmd_backup", "cmd_watch",
+              "cmd_unwatch", "cmd_router", "cmd_routes", "cmd_soul",
+              "cmd_secretary", "cmd_proactive", "cmd_brainbot", "cmd_loop",
+              "cmd_bg", "cmd_fork", "cmd_merge", "cmd_branch"):
+    if _name in globals():
+        globals()[_name] = admin_only(globals()[_name])

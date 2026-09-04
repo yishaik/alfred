@@ -191,6 +191,31 @@ def _blockquote(m: re.Match) -> str:
     return f"<blockquote>{inner}</blockquote>\n"
 
 
+def md_to_plain(text: str) -> str:
+    """Markdown -> readable plain text, for when Telegram rejects the HTML
+    rendering. Sending the raw markdown instead (the old fallback) showed the
+    user literal `> ` and `**` — a quoted draft on 2026-09-03 was unreadable
+    that way. Strips emphasis/code markers, blockquote and heading prefixes,
+    and flattens links to `text (url)`; the words themselves are untouched."""
+    out = []
+    in_fence = False
+    for ln in text.splitlines():
+        if ln.strip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            out.append(ln)
+            continue
+        ln = re.sub(r"^\s{0,3}>\s?", "", ln)            # blockquote
+        ln = re.sub(r"^\s{0,3}#{1,6}\s+", "", ln)        # heading
+        ln = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"\1 (\2)", ln)
+        ln = re.sub(r"(\*\*|__)(.+?)\1", r"\2", ln)      # bold
+        ln = re.sub(r"(?<!\w)[*_](.+?)[*_](?!\w)", r"\1", ln)  # italic
+        ln = re.sub(r"`([^`]*)`", r"\1", ln)              # inline code
+        out.append(ln)
+    return "\n".join(out)
+
+
 def split_msg(text: str, limit: int = TG_MAX) -> list[str]:
     """Split long text on line boundaries where possible."""
     out = []

@@ -27,7 +27,7 @@ from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from . import metrics
 from .config import (BATCH_WINDOW, EDIT_MIN_INTERVAL, FILE_THRESHOLD, IMG_EXTS,
                      SEND_MIN_INTERVAL, TG_MAX, TMP_DIR)
-from .fmt import md_to_html, split_msg
+from .fmt import md_to_html, md_to_plain, split_msg
 
 log = logging.getLogger("bridge.outbox")
 
@@ -308,8 +308,9 @@ class Outbox:
                         parse_mode="HTML", disable_web_page_preview=disable_preview,
                         reply_markup=markup)
                 except BadRequest:
+                    # HTML rejected: show readable plain text, not raw markdown
                     await self.bot.edit_message_text(
-                        text, self.chat_id, self._draft_id,
+                        md_to_plain(text), self.chat_id, self._draft_id,
                         disable_web_page_preview=disable_preview, reply_markup=markup)
             else:
                 await self.bot.edit_message_text(
@@ -348,7 +349,7 @@ class Outbox:
                             disable_web_page_preview=disable_preview,
                             message_thread_id=self.thread_id)
                     except BadRequest:
-                        pass  # fall through to plain
+                        raw = md_to_plain(raw)  # fall through to readable plain
                 return await self.bot.send_message(
                     self.chat_id, raw, reply_markup=reply_markup,
                     disable_web_page_preview=disable_preview,

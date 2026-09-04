@@ -54,7 +54,13 @@ KINDS = ("pinned", "note", "fact")
 
 # How much pinned memory may flow into a prompt, so recall never crowds the task.
 MAX_INJECT_ITEMS = 30
-MAX_INJECT_CHARS = 2000
+# 2000 was far too tight: with 15 real pinned facts (~15k chars) only two made
+# it into the prompt and 13 "must always know" items were silently dropped
+# every session (audit 2026-09-04). Pinned memory IS the always-on layer, so
+# give it real room; the per-item cap below keeps one verbose pin from
+# crowding out the rest.
+MAX_INJECT_CHARS = 16000
+MAX_PIN_CHARS = 1500
 
 # Markers delimiting the managed pinned block inside NAPKIN.md.
 PIN_START = "<!-- alfred:pinned:start -->"
@@ -148,6 +154,12 @@ class Memory:
             kind = "fact"
         now = time.time() if now is None else now
         if kind == "pinned":
+            if len(text) > MAX_PIN_CHARS:
+                # Never lose what the user asked to keep, but say so: an
+                # oversized pin is the thing that starves the others.
+                log.warning("pinned fact is %d chars (cap %d) — stored, but "
+                            "consider a note + a short pin instead",
+                            len(text), MAX_PIN_CHARS)
             bullets = self._read_pinned()
             if not any(b.lower() == text.lower() for b in bullets):
                 bullets.append(text)
@@ -265,6 +277,15 @@ class Memory:
                     break
                 lines.append(line)
                 used += len(line)
+            dropped = len(pinned) - len(lines)
+            if dropped > 0:
+                # Say it in the prompt AND the log: a silently truncated memory
+                # is worse than a visibly truncated one.
+                log.warning("pinned memory truncated: %d of %d facts injected "
+                            "(%d chars, cap %d)", len(lines), len(pinned),
+                            used, MAX_INJECT_CHARS)
+                lines.append(f"(+{dropped} more pinned facts not shown — the "
+                             "pinned block is over budget; use /memory to trim)")
             blocks.append(
                 "WHAT YOU REMEMBER (carried from earlier sessions — treat as "
                 "background you already know, don't re-announce it):\n"
