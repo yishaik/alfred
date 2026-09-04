@@ -122,12 +122,28 @@ Dropped messages are announced (`🚦 …dropped: hop limit/rate limit`), never 
 ## Bridge commands
 `/start /panel /status /restart /interrupt /kill` ·
 `/agents /newagent /delagent /bind` ·
+`/loop <goal>` `/loop status|resume|cancel` ·
 `/auto on|off` (approvals) · `/secretary on|off` · `/tts on|off` · `/cwd <path>` ·
 `/jobs` `/remind <when>|<text>` · `/sessions` `/fork` `/find <text>` ·
 `/audit` `/logs`
 Everything else (including unknown `/slashcommands` like `/clear`, `/compact`,
 `/review`) goes straight to Claude. Note: bridge `/status` and `/agents` shadow
 Claude's commands of the same name — use the 📋 Commands picker for Claude's.
+
+### Evidence-gated Manager Loop
+
+`/loop <goal>` runs a long repository task without occupying the normal chat.
+A manager creates measurable phases, an implementer works one phase at a time,
+a separate verifier inspects the real artifacts, and a final integrator runs
+system-level checks. State is stored in `state/manager-loops.json`.
+
+- `/loop status` — show the ten most recent runs and verified phase counts
+- `/loop resume <id>` — explicitly continue a run paused by an error or restart
+- `/loop cancel <id>` — stop a live or paused run
+
+Only one loop may edit a working directory at a time. A phase advances after a
+verifier returns `PASS` with evidence; failed verification gets one corrective
+retry. Restarted work remains paused so tool execution never resumes silently.
 
 ## Run it
 ```

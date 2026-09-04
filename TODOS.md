@@ -95,6 +95,11 @@ Deferred deliberately on 2026-08-01 — the critical read path is covered.
 ---
 
 ## ✅ Done (recent)
+- [x] **Evidence-gated Manager Loop** — `/loop <goal>` now plans measurable
+      phases, implements them in an isolated session, requires independent
+      verification evidence, performs a final integration review, persists
+      state, serializes edits per workdir, and pauses safely across restarts —
+      2026-09-04
 - [x] **Alfred timezone scoped to Israel** — systemd drop-in sets
       `TZ=Asia/Jerusalem` for all four bridge services while the host remains
       on UTC; applies on the next service start without interrupting the active
