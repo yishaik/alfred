@@ -544,6 +544,62 @@ async def cmd_bg(update: Update, ctx):
         TurnSource())
 
 
+async def cmd_loop(update: Update, ctx):
+    """Start or control an evidence-gated long-horizon Manager Loop."""
+    m = mgr(ctx)
+    args = list(ctx.args or [])
+    action = args[0].lower() if args else "status"
+    if action in {"status", "list"}:
+        rows = m.manager_loop.summaries()
+        await update.message.reply_text(
+            "🧭 Manager Loops\n" + ("\n".join(rows) if rows else "(none yet)"))
+        return
+    if action in {"resume", "cancel"}:
+        if len(args) < 2:
+            await update.message.reply_text(f"usage: /loop {action} <id>")
+            return
+        rid = args[1].strip()
+        if action == "cancel":
+            ok = m.manager_loop.cancel(rid)
+            text = (f"🛑 loop {rid} cancelled" if ok else
+                    f"loop {rid} not found or already finished")
+            await update.message.reply_text(text)
+            return
+        chat_id, thread_id = _route(update)
+
+        async def resumed_notice(text: str):
+            await ctx.bot.send_message(chat_id, text, message_thread_id=thread_id)
+
+        try:
+            m.manager_loop.resume(rid, resumed_notice)
+            await update.message.reply_text(f"▶️ loop {rid} resumed")
+        except ValueError as exc:
+            await update.message.reply_text(f"⚠️ {exc}")
+        return
+
+    goal = " ".join(args).strip()
+    if not goal:
+        await update.message.reply_text(
+            "usage: /loop <goal> | /loop status | /loop resume <id> | "
+            "/loop cancel <id>")
+        return
+    session = await _session(update, ctx)
+    chat_id, thread_id = _route(update)
+
+    async def notify(text: str):
+        await ctx.bot.send_message(chat_id, text, message_thread_id=thread_id)
+
+    try:
+        rid = m.manager_loop.start(goal, session.cfg.name,
+                                   session.cfg.workdir, notify)
+    except ValueError as exc:
+        await update.message.reply_text(f"⚠️ {exc}")
+        return
+    await update.message.reply_text(
+        f"🧭 loop {rid} started in {session.cfg.workdir}. "
+        "Normal chat remains available.")
+
+
 async def cmd_mute(update: Update, ctx):
     """Silence this route's output without closing the session (issue #19)."""
     s = await _session(update, ctx)

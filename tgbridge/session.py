@@ -90,6 +90,8 @@ def _cost_emoji(cost: float) -> str:
 SAFE_TOOLS = ["Read", "Glob", "Grep", "WebSearch", "WebFetch", "TodoWrite",
               "Task", "NotebookRead", "ListMcpResourcesTool", "TaskList",
               "TaskGet"]
+READ_ONLY_TOOLS = {"Read", "Glob", "Grep", "WebSearch", "WebFetch",
+                   "NotebookRead", "ListMcpResourcesTool", "TaskList", "TaskGet"}
 
 BRIDGE_PROMPT = """You are reachable through a Telegram bridge: your text is shown to a single \
 user in Telegram. Phone-friendly output, please: short paragraphs, no wide tables.
@@ -161,13 +163,15 @@ class AgentConfig:
     voice: str = ""             # TTS voice override ("" = backend default)
     proactive: bool = False
     always_allow: list = field(default_factory=list)
+    read_only: bool = False       # orchestration manager/verifier/integrator
 
     def to_dict(self):
         return {"workdir": self.workdir, "model": self.model,
                 "soul": self.soul.to_dict(), "secretary": self.secretary,
                 "auto_approve": self.auto_approve, "tts": self.tts,
                 "voice": self.voice, "proactive": self.proactive,
-                "always_allow": sorted(self.always_allow)}
+                "always_allow": sorted(self.always_allow),
+                "read_only": self.read_only}
 
     @classmethod
     def from_dict(cls, name, d):
@@ -183,7 +187,8 @@ class AgentConfig:
                    auto_approve=bool(d.get("auto_approve", True)),
                    tts=bool(d.get("tts")), voice=d.get("voice", ""),
                    proactive=bool(d.get("proactive")),
-                   always_allow=list(d.get("always_allow", [])))
+                   always_allow=list(d.get("always_allow", [])),
+                   read_only=bool(d.get("read_only", False)))
 
 
 @dataclass
@@ -1199,6 +1204,10 @@ class AgentSession:
 
     # -- permissions / questions ----------------------------------------------#
     async def _can_use_tool(self, tool_name: str, tool_input: dict, ctx):
+        if self.cfg.read_only and tool_name not in READ_ONLY_TOOLS:
+            return PermissionResultDeny(
+                message="[bridge] this orchestration role is read-only; inspect "
+                        "and report without changing files or external state")
         # AskUserQuestion: handle here ONLY in approvals mode. In bypass mode the
         # AssistantMessage handler renders it via _legacy_question; handling it
         # here too delivered the question/answer twice (the duplicate-question bug).

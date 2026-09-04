@@ -99,6 +99,10 @@ class AgentManager:
         self._watch_task: asyncio.Task | None = None
         self._crash_times: list[float] = []     # monotonic stamps of recent crashes
         self._active_alerts: set[str] = set()    # escalation keys currently tripped
+        # Durable long-task orchestration is separate from ordinary chat sessions.
+        # Imported here to keep manager_loop's AgentConfig dependency acyclic.
+        from .manager_loop import ManagerLoop
+        self.manager_loop = ManagerLoop(self)
 
     def _migrate_legacy(self):
         if "main@p" not in self.session_ids and LEGACY_SESSION_FILE.exists():
@@ -355,6 +359,7 @@ class AgentManager:
         self.save_agents()
 
     async def stop_all(self):
+        await self.manager_loop.stop()
         loops = [self._health_task, self._proactive_task, self._digest_task,
                  self._escalate_task, self._dream_task, self._watch_task]
         live = [t for t in loops if t and not t.done()]
