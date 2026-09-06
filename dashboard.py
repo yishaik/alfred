@@ -310,7 +310,25 @@ a{{color:var(--acc)}}
 
 # Per-process CSRF token — same reasoning as secretbox: the tailnet identity
 # proves who, not intent. Every form carries it; do_POST verifies.
-CSRF_TOKEN = _secrets.token_urlsafe(24)
+def _load_csrf() -> str:
+    f = ALFRED / "state" / "dashboard_csrf.token"
+    try:
+        t = f.read_text(encoding="utf-8").strip()
+        if t:
+            return t
+    except OSError:
+        pass
+    t = _secrets.token_urlsafe(24)
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(t, encoding="utf-8")
+        f.chmod(0o600)
+    except OSError:
+        pass
+    return t
+
+
+CSRF_TOKEN = _load_csrf()
 CSRF_FIELD = f'<input type="hidden" name="csrf" value="{CSRF_TOKEN}">'
 
 

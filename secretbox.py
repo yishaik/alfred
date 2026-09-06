@@ -401,7 +401,28 @@ def esc(s) -> str:
 # request, not that they meant to: a cross-site form on any page open in the
 # same browser would reach this app with the identity attached. Every mutating
 # form carries this and do_POST checks it. Restart -> reload the page.
-CSRF_TOKEN = _secrets.token_urlsafe(24)
+def _load_csrf() -> str:
+    """Persist the CSRF token so a page loaded before a restart still validates.
+    A per-process token meant every restart invalidated open tabs — on a phone,
+    where the page is usually reopened from cache, that read as "always broken"."""
+    f = ALFRED / "state" / "secretbox_csrf.token"
+    try:
+        t = f.read_text(encoding="utf-8").strip()
+        if t:
+            return t
+    except OSError:
+        pass
+    t = _secrets.token_urlsafe(24)
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(t, encoding="utf-8")
+        f.chmod(0o600)
+    except OSError:
+        pass
+    return t
+
+
+CSRF_TOKEN = _load_csrf()
 
 
 def csrf_field() -> str:
