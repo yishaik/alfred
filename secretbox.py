@@ -898,7 +898,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         form = parse_qs(self.rfile.read(n).decode())
         if not token_eq((form.get("csrf") or [""])[0], CSRF_TOKEN):
-            self.send_error(403, "stale or missing form token — reload the page")
+            self.send_error(403, "stale or missing form token - reload the page")
             return
         key = (form.get("slot") or [""])[0]
         value = (form.get("value") or [""])[0].strip()

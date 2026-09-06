@@ -362,7 +362,7 @@ class H(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", 0) or 0)
         form = parse_qs(self.rfile.read(min(n, 8192)).decode())
         if not hmac.compare_digest((form.get("csrf") or [""])[0], CSRF_TOKEN):
-            self.send_error(403, "stale or missing form token — reload the page")
+            self.send_error(403, "stale or missing form token - reload the page")
             return
         tid = (form.get("id") or [""])[0]
         act = (form.get("act") or [""])[0]
