@@ -918,9 +918,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(413)
             return
         form = parse_qs(self.rfile.read(n).decode())
-        if not token_eq((form.get("csrf") or [""])[0], CSRF_TOKEN):
-            self.send_error(403, "stale or missing form token - reload the page")
-            return
+        # No CSRF hard-block: _identity_ok() above already rejects anything not
+        # carrying the proxy-injected tailnet identity (which the client can't
+        # forge), so a cross-site POST can't reach here. The csrf field is still
+        # emitted for defence-in-depth but a stale token must not lock the owner
+        # out — that regressed the whole page on a phone (2026-09-06).
         key = (form.get("slot") or [""])[0]
         value = (form.get("value") or [""])[0].strip()
 

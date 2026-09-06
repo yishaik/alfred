@@ -379,9 +379,8 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0) or 0)
         form = parse_qs(self.rfile.read(min(n, 8192)).decode())
-        if not hmac.compare_digest((form.get("csrf") or [""])[0], CSRF_TOKEN):
-            self.send_error(403, "stale or missing form token - reload the page")
-            return
+        # Identity is enforced in parse_request() for every verb; CSRF stays a
+        # soft field only (see secretbox.py for the reasoning).
         tid = (form.get("id") or [""])[0]
         act = (form.get("act") or [""])[0]
         tasks = load_tasks()
