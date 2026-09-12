@@ -120,6 +120,12 @@ and permission prompts as Telegram buttons.
 Dropped messages are announced (`🚦 …dropped: hop limit/rate limit`), never silent.
 
 ## Bridge commands
+
+**LG TV remote:** `/tv` opens a built-in webOS remote with a direct LAN
+connection, persistent pairing, navigation, audio, apps, HDMI and optional
+Wake-on-LAN. First use: `/tv connect <TV_IP>` and accept pairing on the TV.
+See [TV setup and commands](docs/tv-remote.md).
+
 `/start /panel /status /restart /interrupt /kill` ·
 `/agents /newagent /delagent /bind` ·
 `/auto on|off` (approvals) · `/secretary on|off` · `/tts on|off` · `/cwd <path>` ·

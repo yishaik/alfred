@@ -95,6 +95,14 @@ Deferred deliberately on 2026-08-01 — the critical read path is covered.
 ---
 
 ## ✅ Done (recent)
+- [x] **Direct LG webOS remote** — `/tv`, Panel entry, inline controls,
+      saved pairing, apps/HDMI, reconnects, visible errors and Wake-on-LAN;
+      direct state/catalog reads verified on the local TV — 2026-09-12.
+      [Setup](docs/tv-remote.md).
+- [ ] **Load and check `/tv` in Telegram after the next orchestrator-managed
+      bridge process restart** — source is ready and local pairing is saved;
+      this session did not restart the bridge or send Telegram test messages.
+      Verify navigation and physical Wake-on-LAN after reload.
 - [x] **Alfred timezone scoped to Israel** — systemd drop-in sets
       `TZ=Asia/Jerusalem` for all four bridge services while the host remains
       on UTC; applies on the next service start without interrupting the active

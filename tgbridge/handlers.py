@@ -18,7 +18,7 @@ from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
                       ReplyKeyboardMarkup, ReplyKeyboardRemove, Update)
 from telegram.ext import ContextTypes
 
-from . import metrics, router, voice
+from . import metrics, router, voice, tv_handlers
 from .config import (APP_LOG_FILE, AUDIT_FILE, GROUP_ID, INBOX, MAX_JOBS,
                      PEERS, authorized_chat)
 from .manager import AgentManager
@@ -125,7 +125,8 @@ def panel_kb(s) -> InlineKeyboardMarkup:
          InlineKeyboardButton(engine_label, callback_data="send:/engine"),
          InlineKeyboardButton("🤖 Agents", callback_data="menu:agents")],
         [InlineKeyboardButton("⏰ Jobs", callback_data="menu:jobs"),
-         InlineKeyboardButton("📂 Status", callback_data="act:status")],
+         InlineKeyboardButton("📂 Status", callback_data="act:status"),
+         InlineKeyboardButton("📺 שלט", callback_data="tv:panel")],
         [InlineKeyboardButton(auto_label, callback_data="act:auto"),
          InlineKeyboardButton(sec_label, callback_data="act:secretary")],
         [InlineKeyboardButton("✨ Features", callback_data="menu:features"),
@@ -1447,13 +1448,17 @@ async def on_text(update: Update, ctx):
     if key in _SEEN_MSGS:
         return
     _SEEN_MSGS.append(key)
-    s = await _session(update, ctx)
     text = msg.text
     # A quick-bar tap arrives as ordinary text. Turn it back into the command it
     # stands for, before it is treated as something to say to the agent.
     if text in QUICK_BAR:
         await _run_quick(update, ctx, QUICK_BAR[text])
         return
+    # Older remote keyboards use the direct client too, without starting an agent.
+    if text in tv_handlers.LEGACY:
+        await tv_handlers.legacy_tap(update, ctx)
+        return
+    s = await _session(update, ctx)
     # Resolve a pending "Other / type your answer" question without re-feeding Claude
     for qid, st in list(s.questions.items()):
         if st.get("waiting_text") and not st["future"].done():

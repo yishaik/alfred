@@ -19,7 +19,7 @@ from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
                           CommandHandler, MessageHandler,
                           MessageReactionHandler, filters)
 
-from . import handlers
+from . import handlers, tv_handlers
 from .config import (APP_LOG_FILE, BOT_TOKEN, CHAT_ID, GROUP_ID, INBOX,
                      INVALID_DANGER_PATTERNS, LOCK_PORT, STATE_DIR, sweep_tmp,
                      system_drive_free_gb)
@@ -36,6 +36,7 @@ log = logging.getLogger("bridge")
 # under Telegram's 100-command cap, each description short.
 BOT_COMMANDS = [
     ("panel", "לוח בקרה"),
+    ("tv", "שלט לטלוויזיית LG"),
     ("brainbot", "יצירת בוט Second Brain"),
     ("status", "מצב"),
     ("version", "איזה קוד רץ"),
@@ -172,6 +173,7 @@ async def post_init(app):
 
 
 async def post_shutdown(app):
+    await tv_handlers.shutdown(app)
     m: AgentManager = app.bot_data.get("mgr")
     if not m:
         return
@@ -281,6 +283,7 @@ def main():
 
     cmds = {
         "start": handlers.cmd_start,
+        "tv": tv_handlers.cmd_tv,
         "brainbot": handlers.cmd_brainbot,
         "panel": handlers.cmd_panel, "menu": handlers.cmd_panel,
         "status": handlers.cmd_status,
@@ -336,7 +339,7 @@ def main():
         "logs": handlers.cmd_logs,
     }
     for name, fn in cmds.items():
-        app.add_handler(CommandHandler(name, fn, filters=auth))
+        app.add_handler(CommandHandler(name, fn, filters=auth, block=name != "tv"))
 
     app.add_handler(MessageReactionHandler(handlers.on_reaction))
     app.add_handler(MessageHandler(
@@ -352,6 +355,7 @@ def main():
         auth & (filters.PHOTO | filters.Document.ALL | filters.VIDEO),
         handlers.on_media))
     app.add_handler(MessageHandler(auth & filters.TEXT, handlers.on_text))
+    app.add_handler(CallbackQueryHandler(tv_handlers.on_tv_callback, pattern=r"^tv:", block=False))
     app.add_handler(CallbackQueryHandler(handlers.on_callback))
     app.add_error_handler(handlers.on_error)
 
