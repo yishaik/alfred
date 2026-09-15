@@ -131,15 +131,9 @@ async def post_init(app):
         await app.bot.set_my_commands(BOT_COMMANDS)
     except Exception as e:
         log.warning("set_my_commands failed: %s", e)   # never block startup
-    from .managed_bots import needs_creation, request_keyboard
-    if needs_creation():
-        try:
-            await app.bot.send_message(
-                CHAT_ID,
-                "🧠 מוכן ליצור את בוט ה־Second Brain. צריך רק ללחוץ:",
-                reply_markup=request_keyboard())
-        except Exception:
-            log.exception("managed-bot creation button failed")
+    # The Second Brain bot already exists, so we no longer prompt to create it on
+    # every startup (needs_creation() only checks for a local .env-secondbrain marker,
+    # which isn't present here → it kept nagging). Use the on-demand command instead.
     try:
         INBOX.mkdir(parents=True, exist_ok=True)
     except Exception:
