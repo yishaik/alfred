@@ -50,6 +50,38 @@ CODEX_BIN = os.environ.get("BRIDGE_CODEX_BIN", "") or shutil.which("codex") or \
 # One thread id per agent, so /engine codex resumes where it left off rather
 # than starting fresh on every message.
 _threads: dict[str, str] = {}
+# Optional per-agent model override (else codex uses its configured default).
+_models: dict[str, str] = {}
+
+
+def get_model(agent: str) -> str | None:
+    return _models.get(agent)
+
+
+def set_model(agent: str, model: str | None) -> None:
+    if model:
+        _models[agent] = model
+    else:
+        _models.pop(agent, None)
+    # A codex thread is pinned to the model it started with; drop it so the new
+    # model takes effect on the next turn.
+    _threads.pop(agent, None)
+
+
+def list_models() -> list[tuple[str, str]]:
+    """Selectable codex models from ~/.codex/models_cache.json (internal
+    slugs like gpt-reserve / codex-auto-review filtered out)."""
+    try:
+        data = json.loads((Path.home() / ".codex/models_cache.json").read_text())
+        arr = data if isinstance(data, list) else (data.get("models") or data.get("data") or [])
+        out = []
+        for m in arr:
+            mid = m if isinstance(m, str) else (m.get("id") or m.get("slug") or m.get("name"))
+            if mid and not any(x in mid for x in ("reserve", "auto-review")):
+                out.append((mid, mid))
+        return out
+    except Exception:
+        return []
 
 # Keep this deliberately narrower than a generic "limit" search: context-window,
 # tool-output and file-size limits are turn-specific and must not move the whole
@@ -95,7 +127,8 @@ def clear_thread(agent: str) -> None:
     _threads.pop(agent, None)
 
 
-def _argv(prompt: str, workdir: str, thread: str | None) -> list[str]:
+def _argv(prompt: str, workdir: str, thread: str | None,
+          model: str | None = None) -> list[str]:
     # Codex sandboxes by default and would stop to ask before writing. There is
     # no interactive terminal here, so an approval prompt just hangs the turn;
     # the bridge is already an authorised agent running as the owner.
@@ -104,9 +137,11 @@ def _argv(prompt: str, workdir: str, thread: str | None) -> list[str]:
         # `resume` takes no --cd: the working directory belongs to the thread
         # and is restored with it. Passing it anyway makes codex exit 2 with a
         # usage message, which reads like a malformed command rather than an
-        # unsupported flag.
+        # unsupported flag. The model is pinned to the thread too (set_model
+        # clears the thread so a model change starts fresh).
         return [CODEX_BIN, "exec", "resume", *flags, thread, prompt]
-    return [CODEX_BIN, "exec", *flags, "--cd", workdir, prompt]
+    mflag = ["-m", model] if model else []
+    return [CODEX_BIN, "exec", *flags, *mflag, "--cd", workdir, prompt]
 
 
 def _extract(stdout: str) -> tuple[str, str | None, dict]:
@@ -140,7 +175,7 @@ async def run_turn(agent: str, prompt: str, workdir: str,
                    timeout: float = 900.0) -> tuple[str, dict]:
     """Run one turn. Returns (reply_text, usage). Raises on process failure."""
     thread = thread_for(agent)
-    argv = _argv(prompt, workdir, thread)
+    argv = _argv(prompt, workdir, thread, _models.get(agent))
     proc = await asyncio.create_subprocess_exec(
         *argv,
         stdout=asyncio.subprocess.PIPE,

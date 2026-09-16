@@ -21,6 +21,7 @@ import asyncio
 import logging
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -79,13 +80,50 @@ def clear_thread(agent: str) -> None:
     _state.pop(agent, None)
 
 
+def get_model(agent: str) -> str | None:
+    return (_state.get(agent) or {}).get("model")
+
+
+def set_model(agent: str, model: str | None) -> None:
+    st = _state.setdefault(agent, {"conv": None, "transcript": "", "model": None})
+    st["model"] = model or None
+    # A conversation is tied to the model it started on; reset so the new model
+    # takes effect on the next turn.
+    st["conv"] = None
+    st["transcript"] = ""
+
+
+_models_cache: list[tuple[str, str]] = []
+
+
+def list_models() -> list[tuple[str, str]]:
+    """Antigravity's available models via `agy models` (cached). Rows are
+    'id\\tLabel'; the leading 'Fetching…' line has no tab and is skipped."""
+    global _models_cache
+    if _models_cache:
+        return _models_cache
+    try:
+        out = subprocess.run([AGY_EXE, "models"], capture_output=True,
+                             text=True, timeout=40).stdout
+        rows = []
+        for line in out.splitlines():
+            if "\t" in line:
+                mid, label = line.split("\t", 1)
+                rows.append((mid.strip(), label.strip()))
+        _models_cache = rows
+        return rows
+    except Exception:
+        return []
+
+
 async def run_turn(agent: str, prompt: str, workdir: str,
                    timeout: float = 1800.0) -> tuple[str, dict]:
     """Run one turn. Returns (reply_text, usage). Raises on process failure."""
     AgyRunner, TurnState, strip_known_prefix = _load_driver()
-    st = _state.setdefault(agent, {"conv": None, "transcript": ""})
+    st = _state.setdefault(agent, {"conv": None, "transcript": "", "model": None})
     runner = AgyRunner(exe=AGY_EXE, workdir=workdir, tmp_dir=_TMP,
-                       skip_permissions=True, timeout=int(timeout))
+                       model=st.get("model") or "", skip_permissions=True,
+                       timeout=int(timeout))
     state = TurnState()
     result = await asyncio.to_thread(runner.run_turn, prompt, st["conv"], state)
     if getattr(result, "error", None) and not result.text:

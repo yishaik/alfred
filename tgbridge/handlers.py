@@ -153,7 +153,33 @@ def features_kb(s) -> InlineKeyboardMarkup:
     ])
 
 
-def model_kb(current: str) -> InlineKeyboardMarkup:
+def model_kb(s) -> InlineKeyboardMarkup:
+    # Engine-aware: shows the ACTIVE engine's models. Codex/Antigravity models
+    # are per-agent overrides on that engine; Claude models are the durable
+    # session model. Each engine gets its own callback prefix so paths don't mix.
+    engine = getattr(s, "engine", "claude")
+    if engine in ("codex", "antigravity"):
+        from . import antigravity_engine, codex_engine
+        mod = codex_engine if engine == "codex" else antigravity_engine
+        prefix = "cmodel" if engine == "codex" else "amodel"
+        cur = mod.get_model(s.cfg.name)
+        rows, row = [], []
+        for mid, label in mod.list_models():
+            row.append(InlineKeyboardButton(("● " if cur == mid else "") + label,
+                                            callback_data=f"{prefix}:{mid}"))
+            if len(row) == 2:
+                rows.append(row); row = []
+        if row:
+            rows.append(row)
+        if not rows:
+            rows.append([InlineKeyboardButton("(no models found)", callback_data="menu:back")])
+        rows.append([InlineKeyboardButton(("● " if not cur else "") + "default",
+                                          callback_data=f"{prefix}:")])
+        rows.append([InlineKeyboardButton("⬅ Back", callback_data="menu:back")])
+        return InlineKeyboardMarkup(rows)
+
+    current = s.cfg.model
+
     def lbl(name, val):
         return ("● " if current == val else "") + name
     # Claude models = the durable SESSION model (subscription, set_model live).
@@ -1118,7 +1144,16 @@ async def cmd_routes(update: Update, ctx):
 
 
 def _model_picker_text(s) -> str:
-    """Header for the Claude session-model picker (/model)."""
+    """Header for the model picker — shows the ACTIVE engine's models (/model)."""
+    engine = getattr(s, "engine", "claude")
+    if engine == "antigravity":
+        from . import antigravity_engine
+        return ("🧠 מודל Antigravity (מנוע פעיל):\n"
+                f"נוכחי: {antigravity_engine.get_model(s.cfg.name) or 'default'}")
+    if engine == "codex":
+        from . import codex_engine
+        return ("🧠 מודל Codex (מנוע פעיל):\n"
+                f"נוכחי: {codex_engine.get_model(s.cfg.name) or 'default'}")
     return (
         "🧠 בחר מודל שיחה (Claude, מנוי — משתנה מיידית):\n"
         f"נוכחי: {_pretty_model(s.cfg.model) or 'default'}\n"
@@ -1138,7 +1173,7 @@ async def cmd_model(update: Update, ctx):
     """Claude session-model picker (durable, subscription)."""
     s = await _session(update, ctx)
     await update.message.reply_text(
-        _model_picker_text(s), reply_markup=model_kb(s.cfg.model))
+        _model_picker_text(s), reply_markup=model_kb(s))
 
 
 async def cmd_models(update: Update, ctx):
@@ -1683,7 +1718,7 @@ async def on_callback(update: Update, ctx):
                        "restarting session…", panel_kb(s))
         await s.restart(resume=True, note="")
     elif data == "menu:model":
-        await _edit(q, _model_picker_text(s), model_kb(s.cfg.model))
+        await _edit(q, _model_picker_text(s), model_kb(s))
     elif data == "menu:xmodel":
         await _edit(q, _xmodel_picker_text(), xmodels_kb())
     elif data == "menu:router":
@@ -1716,6 +1751,16 @@ async def on_callback(update: Update, ctx):
         else:
             applied = "after /restart"
         await _edit(q, f"🧠 model → {model or 'default'} ({applied})", panel_kb(s))
+    elif data.startswith("amodel:"):
+        from . import antigravity_engine
+        mid = data.split(":", 1)[1]
+        antigravity_engine.set_model(s.cfg.name, mid or None)
+        await _edit(q, _model_picker_text(s), model_kb(s))
+    elif data.startswith("cmodel:"):
+        from . import codex_engine
+        mid = data.split(":", 1)[1]
+        codex_engine.set_model(s.cfg.name, mid or None)
+        await _edit(q, _model_picker_text(s), model_kb(s))
     elif data.startswith("xmodel:"):
         prov = data.split(":", 1)[1]
         # one-shot pin: the NEXT user message is answered by this external
