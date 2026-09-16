@@ -157,14 +157,14 @@ def model_kb(current: str) -> InlineKeyboardMarkup:
     def lbl(name, val):
         return ("● " if current == val else "") + name
     # Claude models = the durable SESSION model (subscription, set_model live).
-    # Pinned dateless ids (Opus 5, Opus 4.8, Sonnet 5, Fable 5); Haiku stays the
+    # Pinned dateless ids (Opus 5, Opus 4.8, Sonnet 5, Fable 5.1); Haiku stays the
     # evergreen alias. External (paid) models live in a SEPARATE picker
     # (🌐 חיצוניים) because they can't be a session model.
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(lbl("Opus 5", "claude-opus-5"), callback_data="model:claude-opus-5"),
          InlineKeyboardButton(lbl("Opus 4.8", "claude-opus-4-8"), callback_data="model:claude-opus-4-8")],
         [InlineKeyboardButton(lbl("Sonnet 5", "claude-sonnet-5"), callback_data="model:claude-sonnet-5"),
-         InlineKeyboardButton(lbl("Fable 5", "claude-fable-5"), callback_data="model:claude-fable-5"),
+         InlineKeyboardButton(lbl("Fable 5.1", "claude-fable-5-1"), callback_data="model:claude-fable-5-1"),
          InlineKeyboardButton(lbl("Haiku", "haiku"), callback_data="model:haiku")],
         [InlineKeyboardButton(lbl("Default", ""), callback_data="model:"),
          InlineKeyboardButton("🌐 חיצוניים", callback_data="menu:xmodel")],
