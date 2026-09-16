@@ -34,7 +34,8 @@ from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
                       ReactionTypeEmoji)
 from telegram.constants import ChatAction
 
-from . import bridgetools, codex_engine, guards, markers, router, voice
+from . import (antigravity_engine, bridgetools, codex_engine, guards, markers,
+               router, voice)
 import os
 
 from . import metrics
@@ -568,26 +569,32 @@ class AgentSession:
         # already uses: handled here and returned, so the Claude client is
         # never started and nothing downstream changes. Failure falls back to
         # Claude rather than losing the turn.
-        if getattr(self, "engine", "claude") == "codex":
+        eng_name = getattr(self, "engine", "claude")
+        _ext = {"codex": codex_engine,
+                "antigravity": antigravity_engine}.get(eng_name)
+        if _ext:
             try:
                 if echo:
                     self.outbox.emit(f"▶️ {text}")
                 self.outbox.start()
-                reply, usage = await codex_engine.run_turn(
+                reply, usage = await _ext.run_turn(
                     self.cfg.name, text, self.cfg.workdir)
                 self.outbox.emit(reply)
-                log.info("codex turn for %s: %s in / %s out", self.cfg.name,
-                         usage.get("input_tokens"), usage.get("output_tokens"))
+                log.info("%s turn for %s: %s in / %s out", eng_name,
+                         self.cfg.name, usage.get("input_tokens"),
+                         usage.get("output_tokens"))
                 self.outbox.stop()
                 return True
             except Exception as e:
-                log.warning("codex turn failed, falling back to Claude: %s", e)
-                if codex_engine.is_usage_exhausted(e):
+                log.warning("%s turn failed, falling back to Claude: %s",
+                            eng_name, e)
+                if _ext.is_usage_exhausted(e):
                     self.engine = "claude"
-                    self.outbox.emit("🔀 Codex usage is exhausted — switching "
-                                     "automatically to Claude")
+                    self.outbox.emit(f"🔀 {eng_name} usage is exhausted — "
+                                     "switching automatically to Claude")
                 else:
-                    self.outbox.emit(f"⚠️ codex failed ({e}) — this turn goes to Claude")
+                    self.outbox.emit(f"⚠️ {eng_name} failed ({e}) — this turn "
+                                     "goes to Claude")
             # --- model router (fail-safe): scheduler/peer/bot turns never routed.
             # ANY error here → log + fall through to the Claude session as today.
             try:
