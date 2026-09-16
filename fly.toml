@@ -1,0 +1,52 @@
+# Change the app name before the first deploy: fly launch --copy-config --name <unique-name>
+app = "alfred-yishaik-agent"
+primary_region = "fra"
+kill_signal = "SIGTERM"
+kill_timeout = "45s"
+
+[build]
+  dockerfile = "Dockerfile.fly"
+
+[env]
+  PORT = "8080"
+  ALFRED_DATA_DIR = "/data"
+  BRIDGE_WORKDIR = "/data/workspaces"
+  BRIDGE_MODEL = "claude-fable-5"
+  BRIDGE_ROUTER = "1"
+  BRIDGE_SHOW_DIFFS = "1"
+  BRIDGE_HEALTH_TIME = "09:00"
+  ALFRED_ALLOW_PRODUCTION_DEPLOY = "0"
+  ALFRED_CLAUDE_MODEL = "claude-fable-5"
+  ALFRED_CLAUDE_FALLBACK_MODEL = "claude-opus-4-8"
+  ALFRED_CODEX_MODEL = "gpt-5.6"
+  ALFRED_CODEX_CODING_MODEL = "gpt-5.3-codex"
+  ALFRED_GEMINI_MODEL = "gemini-3.1-pro-preview"
+  ALFRED_GEMINI_FAST_MODEL = "gemini-3.5-flash"
+  ALFRED_GROK_MODEL = "grok-4.5-latest"
+
+[mounts]
+  source = "alfred_data"
+  destination = "/data"
+  initial_size = "10gb"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "3s"
+    grace_period = "45s"
+    method = "GET"
+    path = "/healthz"
+
+[processes]
+  app = "python -m cloud.run_fly"
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2048mb"
