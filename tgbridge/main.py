@@ -16,7 +16,7 @@ from logging.handlers import RotatingFileHandler
 
 from telegram import Update
 from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
-                          CommandHandler, MessageHandler,
+                          CommandHandler, Defaults, MessageHandler,
                           MessageReactionHandler, filters)
 
 from . import handlers, tv_handlers
@@ -272,7 +272,10 @@ def main():
     if GROUP_ID:
         auth = auth | filters.Chat(GROUP_ID)
 
+    # disable_notification: every outgoing message arrives silently (delivered, no
+    # sound/vibration). A specific call can still override with disable_notification=False.
     app = (ApplicationBuilder().token(BOT_TOKEN)
+           .defaults(Defaults(disable_notification=True))
            .post_init(post_init).post_shutdown(post_shutdown).build())
 
     cmds = {
