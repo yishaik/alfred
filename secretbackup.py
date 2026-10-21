@@ -151,6 +151,12 @@ def main() -> int:
         ["git", "-C", str(BACKUP_REPO), "commit", "-q", "-m",
          f"secrets bundle {stamp}"], capture_output=True, text=True)
     if committed.returncode == 0:
+        # The remote can gain commits from elsewhere (a PR, a CI change). A plain
+        # push is then rejected as non-fast-forward and every later bundle stays
+        # local, so rebase onto the remote first. Backup files never conflict:
+        # each commit only adds or removes its own dated files.
+        subprocess.run(["git", "-C", str(BACKUP_REPO), "pull", "--rebase", "-q"],
+                       capture_output=True, text=True)
         push = subprocess.run(["git", "-C", str(BACKUP_REPO), "push", "-q"],
                               capture_output=True, text=True)
         print("pushed" if push.returncode == 0 else f"push failed: {push.stderr.strip()}")
