@@ -43,3 +43,17 @@
 - Orchestrator must activate via restart, then verify /model and a live
   Claude -> Codex -> Claude exchange. Antigravity device/runtime behavior and
   live Claude model discovery remain unverified.
+
+## Follow-up: Engine panel
+- User requested that the panel Engine button switch providers properly.
+- Baseline: sixteen handoff tests pass; full selftest still has the documented
+  Napkin environment blocker.
+- Plan: replace prompt forwarding with a session-bound provider picker, share
+  command/button transition logic, retain context and model pins, and cover
+  stale panels, busy sessions, availability failures and legacy buttons offline.
+- Implemented: Engine picker, provider readiness and active model, direct
+  transitions shared with /engine, and session-bound follow-on model selection.
+  Existing send:/engine panels are handled without passing text to any model.
+- Validation: 13 new panel tests and 16 existing handoff tests pass. Full pytest:
+  83 passed, same pre-existing TV registration failure. No live bridge restart,
+  push, provider inference or Telegram message was performed.

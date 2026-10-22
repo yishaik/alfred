@@ -111,7 +111,8 @@ def _drop_quickbar(rows: list[list[InlineKeyboardButton]]) -> list[list[InlineKe
 
 
 def panel_kb(s) -> InlineKeyboardMarkup:
-    model_label = f"🧠 {s.model or 'default'}"
+    from .engine_ui import active_model
+    model_label = f"🧠 {active_model(s)}"
     auto_label = "🔓 auto-approve" if s.cfg.auto_approve else "🔐 tap-to-approve"
     sec_label = "📋 secretary ●" if s.cfg.secretary else "📋 secretary"
     engine_label = f"🔀 {getattr(s, 'engine', 'claude')}"
@@ -122,7 +123,7 @@ def panel_kb(s) -> InlineKeyboardMarkup:
          InlineKeyboardButton("🗜 Compact", callback_data="send:/compact"),
          InlineKeyboardButton("📊 Context", callback_data="send:/context")],
         [InlineKeyboardButton(model_label, callback_data="menu:model"),
-         InlineKeyboardButton(engine_label, callback_data="send:/engine"),
+         InlineKeyboardButton(engine_label, callback_data=f"eng:{s.sid}:menu"),
          InlineKeyboardButton("🤖 Agents", callback_data="menu:agents")],
         [InlineKeyboardButton("⏰ Jobs", callback_data="menu:jobs"),
          InlineKeyboardButton("📂 Status", callback_data="act:status"),
@@ -972,61 +973,23 @@ async def cmd_peers(update: Update, ctx):
 
 
 async def cmd_engine(update: Update, ctx):
-    """Switch this agent between the Claude and Codex subscriptions.
-
-    Per-session on purpose: the point is to move one conversation onto the
-    other plan without disturbing the other agents.
-    """
-    from . import antigravity_engine, codex_engine
+    """Engine menu; command arguments use the same transition as panel buttons."""
+    from .engine_ui import BACKENDS, card, select
     s = await _session(update, ctx)
     arg = " ".join(ctx.args).strip().lower() if ctx.args else ""
-    engines = {"codex": codex_engine, "antigravity": antigravity_engine}
-
-    if not arg:
-        cur = getattr(s, "engine", "claude")
-        lines = [f"🔀 engine: *{cur}*"]
-        for name, mod in engines.items():
-            ok, mode = mod.available()
-            th = mod.thread_for(s.skey)
-            lines.append(f"{name}: {'✅ ' + mode if ok else '❌ ' + mode}"
-                         + (f" · `{th[:8]}…`" if th else ""))
-        lines.append("\n`/engine claude` · `/engine codex` · "
-                     "`/engine antigravity` · `/engine reset`")
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-        return
-
-    if s.busy:
-        await update.message.reply_text("⏳ יש תשובה בתהליך. החלף מנוע בסיום התשובה.")
-        return
-
     if arg == "reset":
-        for mod in engines.values():
-            mod.clear_thread(s.skey)
-        await update.message.reply_text(
-            "threads cleared — next codex/antigravity turn starts fresh")
-        return
-
-    if arg not in ("claude", "codex", "antigravity"):
-        await update.message.reply_text(
-            "usage: /engine [claude|codex|antigravity|reset]")
-        return
-
-    if arg in engines:
-        # Check now rather than failing on the next message, when the reason
-        # would be buried in a fallback notice.
-        ok, why = engines[arg].available()
-        if not ok:
-            await update.message.reply_text(f"❌ cannot switch: {why}")
+        if s.busy:
+            await update.message.reply_text("Wait for the active answer before resetting threads.")
             return
-
-    s.engine = arg
-    s.handoff.state["engine"] = arg
-    s.handoff.save()
-    note = ("\n\nNote: the bridge's own tools (files, memory, scheduling, peers) "
-            "and the guard hooks are Claude-side. This engine has its own file "
-            "and shell tools, and answers whole rather than streaming."
-            if arg in engines else "")
-    await update.message.reply_text(f"🔀 engine → *{arg}*{note}", parse_mode="Markdown")
+        for backend in BACKENDS.values():
+            backend.clear_thread(s.skey)
+        notice = "Native threads cleared; conversation history is retained."
+    elif arg:
+        notice = select(s, arg)[1]
+    else:
+        notice = ""
+    text, kb = card(s, notice)
+    await update.message.reply_text(text, reply_markup=kb)
 
 
 async def cmd_trace(update: Update, ctx):
@@ -1662,6 +1625,39 @@ async def on_voice(update: Update, ctx):
 # --------------------------------------------------------------------------- #
 # Callbacks
 # --------------------------------------------------------------------------- #
+async def _apply_model_choice(q, s, m, prefix, mid, *, bound=False):
+    if s.busy:
+        await _edit(q, "⏳ יש תשובה בתהליך. החלף מודל בסיום התשובה.", panel_kb(s))
+        return
+    expected = {"model": "claude", "amodel": "antigravity", "cmodel": "codex"}[prefix]
+    if s.engine != expected:
+        await _edit(q, "רשימת המודלים שייכת למנוע אחר. פתח /model מחדש.", panel_kb(s))
+        return
+    if expected == "claude":
+        # Apply before saving, so a rejected model does not become a durable pin.
+        if s.client and s.connected:
+            s.busy = True
+            try:
+                await s.client.set_model(mid or None)
+            except Exception as exc:
+                await _edit(q, f"❌ לא ניתן להחליף מודל: {exc}", panel_kb(s))
+                return
+            finally:
+                s.busy = False
+                asyncio.create_task(s._drain())
+        s.cfg.model = mid
+        s.model = mid
+        s._last_applied_model = mid
+        m.save_agents()
+    else:
+        from . import antigravity_engine, codex_engine
+        mod = codex_engine if expected == "codex" else antigravity_engine
+        mod.set_model(s.skey, mid or None)
+    from .engine_ui import bind_models
+    kb = bind_models(model_kb(s), s.sid) if bound else model_kb(s)
+    await _edit(q, _model_picker_text(s), kb)
+
+
 async def on_callback(update: Update, ctx):
     q = update.callback_query
     if not authorized_chat(update.effective_chat.id):
@@ -1674,7 +1670,7 @@ async def on_callback(update: Update, ctx):
     # session-scoped callbacks carry a sid: pm/qp/qt/qd/qo/bt/qq
     parts = data.split(":")
     tag = parts[0]
-    if tag in ("pm", "qp", "qt", "qd", "qo", "bt", "ud", "ss", "sf", "qq"):
+    if tag in ("pm", "qp", "qt", "qd", "qo", "bt", "ud", "ss", "sf", "qq", "eng"):
         s = m.find_by_sid(int(parts[1])) if len(parts) > 1 and parts[1].isdigit() else None
         if not s:
             try:
@@ -1694,7 +1690,12 @@ async def on_callback(update: Update, ctx):
         q.message.message_thread_id if q.message else None
     s = await m.session_for_route(chat_id, thread_id)
 
-    if data.startswith("send:"):
+    if data in ("send:/engine", "menu:engine"):
+        # Compatibility for panels already posted before the upgrade.
+        from .engine_ui import card
+        text, kb = card(s)
+        await _edit(q, text, kb)
+    elif data.startswith("send:"):
         await s.feed(data[5:], echo=True)
     elif data == "act:interrupt":
         await s.interrupt()
@@ -1742,35 +1743,8 @@ async def on_callback(update: Update, ctx):
     elif data == "menu:back":
         await _edit(q, "Control panel:", panel_kb(s))
     elif data.startswith(("model:", "amodel:", "cmodel:")):
-        if s.busy:
-            await _edit(q, "⏳ יש תשובה בתהליך. החלף מודל בסיום התשובה.", panel_kb(s))
-            return
         prefix, mid = data.split(":", 1)
-        expected = {"model": "claude", "amodel": "antigravity", "cmodel": "codex"}[prefix]
-        if s.engine != expected:
-            await _edit(q, "רשימת המודלים שייכת למנוע אחר. פתח /model מחדש.", panel_kb(s))
-            return
-        if expected == "claude":
-            # Apply before saving, so a rejected model does not become a durable pin.
-            if s.client and s.connected:
-                s.busy = True
-                try:
-                    await s.client.set_model(mid or None)
-                except Exception as exc:
-                    await _edit(q, f"❌ לא ניתן להחליף מודל: {exc}", panel_kb(s))
-                    return
-                finally:
-                    s.busy = False
-                    asyncio.create_task(s._drain())
-            s.cfg.model = mid
-            s.model = mid
-            s._last_applied_model = mid
-            m.save_agents()
-        else:
-            from . import antigravity_engine, codex_engine
-            mod = codex_engine if expected == "codex" else antigravity_engine
-            mod.set_model(s.skey, mid or None)
-        await _edit(q, _model_picker_text(s), model_kb(s))
+        await _apply_model_choice(q, s, m, prefix, mid)
     elif data.startswith("xmodel:"):
         prov = data.split(":", 1)[1]
         # one-shot pin: the NEXT user message is answered by this external
@@ -1884,6 +1858,22 @@ async def _feature_cb(q, s, m, name: str):
 
 
 async def _session_cb(q, s, tag: str, rest: list[str]):
+    if tag == "eng":
+        from .engine_ui import card, select, bind_models
+        action = rest[0] if rest else "menu"
+        if action == "back":
+            await _edit(q, "Control panel:", panel_kb(s))
+        elif action == "models":
+            from .model_catalog import refresh
+            await refresh(s)
+            await _edit(q, _model_picker_text(s), bind_models(model_kb(s), s.sid))
+        elif action == "pick" and len(rest) >= 3 and rest[1] in ("model", "cmodel", "amodel"):
+            await _apply_model_choice(q, s, s.mgr, rest[1], ":".join(rest[2:]), bound=True)
+        else:
+            notice = "" if action == "menu" else select(s, action)[1]
+            text, kb = card(s, notice)
+            await _edit(q, text, kb)
+        return
     if tag == "ud":
         result = await s.undo(int(rest[0]))
         await _edit(q, (q.message.text or "") + f"\n{result}")

@@ -5,6 +5,15 @@
 answer to finish before changing engines or models. Incoming messages queue
 while any engine or the router works.
 
+The panel's Engine button opens a provider picker instead of sending `/engine`
+to the language model. Pick Claude, Codex or Antigravity; the card shows the
+active provider, its model, and local readiness failures. Busy sessions refuse
+changes until the answer finishes. The Model button on this card opens a model
+picker bound to the original session, even if the active agent changes later.
+Buttons for removed sessions expire without changing another agent. Legacy
+`send:/engine` buttons open the picker too. `/engine <provider>` uses the same
+transition as a button tap. Switching preserves native threads and model pins.
+
 `/model` discovers models for the active engine. Refresh reloads the provider
 catalog. Codex uses the installed app-server's `model/list`; Claude uses SDK
 initialization metadata; Antigravity uses `agy models`. If discovery fails,
