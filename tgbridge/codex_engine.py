@@ -42,6 +42,8 @@ import os
 import shutil
 from pathlib import Path
 
+from .config import STATE_DIR, load_json, save_json
+
 log = logging.getLogger("bridge.codex")
 
 CODEX_BIN = os.environ.get("BRIDGE_CODEX_BIN", "") or shutil.which("codex") or \
@@ -49,9 +51,27 @@ CODEX_BIN = os.environ.get("BRIDGE_CODEX_BIN", "") or shutil.which("codex") or \
 
 # One thread id per agent, so /engine codex resumes where it left off rather
 # than starting fresh on every message.
-_threads: dict[str, str] = {}
+_STATE_FILE = STATE_DIR / "codex-threads.json"
+_saved = load_json(_STATE_FILE, {})
+_threads: dict[str, str] = _saved.get("threads", {})
 # Optional per-agent model override (else codex uses its configured default).
-_models: dict[str, str] = {}
+_models: dict[str, str] = _saved.get("models", {})
+
+
+def _persist():
+    try:
+        save_json(_STATE_FILE, {"threads": _threads, "models": _models})
+    except OSError:
+        log.exception("could not persist Codex thread state")
+
+
+def default_model() -> str | None:
+    import tomllib
+    home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    try:
+        return tomllib.loads((home / "config.toml").read_text(encoding="utf-8")).get("model")
+    except (OSError, ValueError):
+        return None
 
 
 def get_model(agent: str) -> str | None:
@@ -63,22 +83,25 @@ def set_model(agent: str, model: str | None) -> None:
         _models[agent] = model
     else:
         _models.pop(agent, None)
-    # A codex thread is pinned to the model it started with; drop it so the new
-    # model takes effect on the next turn.
-    _threads.pop(agent, None)
+    # exec resume supports -m: keep the thread and all native tool context.
+    _persist()
 
 
 def list_models() -> list[tuple[str, str]]:
     """Selectable codex models from ~/.codex/models_cache.json (internal
     slugs like gpt-reserve / codex-auto-review filtered out)."""
     try:
-        data = json.loads((Path.home() / ".codex/models_cache.json").read_text())
+        data = json.loads((Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "models_cache.json").read_text(encoding="utf-8"))
         arr = data if isinstance(data, list) else (data.get("models") or data.get("data") or [])
-        out = []
+        out, seen = [], set()
         for m in arr:
             mid = m if isinstance(m, str) else (m.get("id") or m.get("slug") or m.get("name"))
-            if mid and not any(x in mid for x in ("reserve", "auto-review")):
-                out.append((mid, mid))
+            if isinstance(m, dict) and (m.get("hidden") or m.get("visibility") == "hide"):
+                continue
+            if mid and mid not in seen and not any(x in mid for x in ("reserve", "auto-review")):
+                label = mid if isinstance(m, str) else m.get("display_name") or m.get("displayName") or mid
+                out.append((mid, label))
+                seen.add(mid)
         return out
     except Exception:
         return []
@@ -125,6 +148,7 @@ def thread_for(agent: str) -> str | None:
 
 def clear_thread(agent: str) -> None:
     _threads.pop(agent, None)
+    _persist()
 
 
 def _argv(prompt: str, workdir: str, thread: str | None,
@@ -133,20 +157,18 @@ def _argv(prompt: str, workdir: str, thread: str | None,
     # no interactive terminal here, so an approval prompt just hangs the turn;
     # the bridge is already an authorised agent running as the owner.
     flags = ["--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"]
-    if thread:
-        # `resume` takes no --cd: the working directory belongs to the thread
-        # and is restored with it. Passing it anyway makes codex exit 2 with a
-        # usage message, which reads like a malformed command rather than an
-        # unsupported flag. The model is pinned to the thread too (set_model
-        # clears the thread so a model change starts fresh).
-        return [CODEX_BIN, "exec", "resume", *flags, thread, prompt]
     mflag = ["-m", model] if model else []
+    if thread:
+        # resume restores cwd and context, but accepts a new model explicitly.
+        return [CODEX_BIN, "exec", "resume", *flags, *mflag, thread, prompt]
     return [CODEX_BIN, "exec", *flags, *mflag, "--cd", workdir, prompt]
 
 
-def _extract(stdout: str) -> tuple[str, str | None, dict]:
-    """Pull the reply, the thread id and usage out of the JSON event stream."""
+def _extract(stdout: str) -> tuple[str, str | None, dict, list[str]]:
+    """Pull the reply, the thread id, usage and error messages out of the JSON
+    event stream."""
     parts: list[str] = []
+    errors: list[str] = []
     thread: str | None = None
     usage: dict = {}
     for line in stdout.splitlines():
@@ -166,37 +188,52 @@ def _extract(stdout: str) -> tuple[str, str | None, dict]:
                 parts.append(item["text"])
         elif t == "turn.completed":
             usage = ev.get("usage") or {}
+        elif t == "turn.failed" and (ev.get("error") or {}).get("message"):
+            errors.append(ev["error"]["message"])
+            parts.append(f"⚠️ codex: {ev['error']['message']}")
         elif t == "error" and ev.get("message"):
+            errors.append(ev["message"])
             parts.append(f"⚠️ codex: {ev['message']}")
-    return "\n\n".join(parts).strip(), thread, usage
+    return "\n\n".join(parts).strip(), thread, usage, errors
 
 
 async def run_turn(agent: str, prompt: str, workdir: str,
                    timeout: float = 900.0) -> tuple[str, dict]:
     """Run one turn. Returns (reply_text, usage). Raises on process failure."""
     thread = thread_for(agent)
-    argv = _argv(prompt, workdir, thread, _models.get(agent))
+    argv = _argv(prompt, workdir, thread, _models.get(agent) or default_model())
     proc = await asyncio.create_subprocess_exec(
         *argv,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=workdir,
-        env={**os.environ, "PATH": os.environ.get("PATH", "") + ":" + str(Path.home() / ".local/bin")},
+        env={**os.environ, "PATH": os.environ.get("PATH", "") + os.pathsep + str(Path.home() / ".local/bin")},
     )
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
+        await proc.wait()
         raise RuntimeError(f"codex timed out after {int(timeout)}s")
 
-    text, new_thread, usage = _extract(out.decode("utf-8", "replace"))
+    text, new_thread, usage, errors = _extract(out.decode("utf-8", "replace"))
     if new_thread:
         _threads[agent] = new_thread
     elif thread:
         # A resumed turn does not re-announce the thread; keep the one we had.
         _threads[agent] = thread
+    _persist()
 
-    if proc.returncode != 0 and not text:
+    # A quota error arrives as an event, not a failed exit, so it used to come
+    # back as an ordinary reply and the session never left Codex. Raise it so
+    # feed() sees it and switches the session back to Claude.
+    exhausted = [e for e in errors if is_usage_exhausted(e)]
+    if exhausted:
+        raise RuntimeError(f"codex usage exhausted: {exhausted[-1][:300]}")
+
+    if errors:
+        raise RuntimeError(f"codex turn failed: {errors[-1][:300]}")
+    if proc.returncode != 0:
         tail = (err.decode("utf-8", "replace") or "").strip().splitlines()[-3:]
         raise RuntimeError(f"codex exited {proc.returncode}: {' / '.join(tail)[:300]}")
     return text or "(codex returned nothing)", usage

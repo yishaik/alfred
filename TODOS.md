@@ -1,5 +1,16 @@
 # Alfred — Task Queue
 
+## Model continuity — 2026-10-22
+
+- [x] Discover provider model catalogs; preserve Codex threads across model changes.
+- [x] Persist route-isolated handoff history and external thread/model preferences.
+- [x] Serialize external turns and guard engine/model changes while busy.
+- [ ] Orchestrator activation and live /model + Claude/Codex round-trip validation.
+- [ ] Repair existing Windows Napkin native dependency (exact npm package is 404).
+- [ ] Repair existing TV command registration test failure (reproduced at original HEAD).
+
+See agent-worksheet-2026-10-22.md and docs/model-handoff.md for evidence and limits.
+
 Consolidated from PLAN-*.md files. Agent: work top-to-bottom; one task at a time; update status here.
 
 ## Status legend

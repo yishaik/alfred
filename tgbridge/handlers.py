@@ -162,9 +162,9 @@ def model_kb(s) -> InlineKeyboardMarkup:
         from . import antigravity_engine, codex_engine
         mod = codex_engine if engine == "codex" else antigravity_engine
         prefix = "cmodel" if engine == "codex" else "amodel"
-        cur = mod.get_model(s.cfg.name)
+        cur = mod.get_model(s.skey)
         rows, row = [], []
-        for mid, label in mod.list_models():
+        for mid, label in getattr(s, "model_catalog", {}).get(engine, []):
             row.append(InlineKeyboardButton(("● " if cur == mid else "") + label,
                                             callback_data=f"{prefix}:{mid}"))
             if len(row) == 2:
@@ -175,27 +175,21 @@ def model_kb(s) -> InlineKeyboardMarkup:
             rows.append([InlineKeyboardButton("(no models found)", callback_data="menu:back")])
         rows.append([InlineKeyboardButton(("● " if not cur else "") + "default",
                                           callback_data=f"{prefix}:")])
-        rows.append([InlineKeyboardButton("⬅ Back", callback_data="menu:back")])
+        rows.append([InlineKeyboardButton("↻ Refresh", callback_data="menu:model"),
+                     InlineKeyboardButton("⬅ Back", callback_data="menu:back")])
         return InlineKeyboardMarkup(rows)
 
     current = s.cfg.model
-
-    def lbl(name, val):
-        return ("● " if current == val else "") + name
-    # Claude models = the durable SESSION model (subscription, set_model live).
-    # Pinned dateless ids (Opus 5, Opus 4.8, Sonnet 5, Fable 5.1); Haiku stays the
-    # evergreen alias. External (paid) models live in a SEPARATE picker
-    # (🌐 חיצוניים) because they can't be a session model.
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(lbl("Opus 5", "claude-opus-5"), callback_data="model:claude-opus-5"),
-         InlineKeyboardButton(lbl("Opus 4.8", "claude-opus-4-8"), callback_data="model:claude-opus-4-8")],
-        [InlineKeyboardButton(lbl("Sonnet 5", "claude-sonnet-5"), callback_data="model:claude-sonnet-5"),
-         InlineKeyboardButton(lbl("Fable 5.1", "claude-fable-5-1"), callback_data="model:claude-fable-5-1"),
-         InlineKeyboardButton(lbl("Haiku", "haiku"), callback_data="model:haiku")],
-        [InlineKeyboardButton(lbl("Default", ""), callback_data="model:"),
-         InlineKeyboardButton("🌐 חיצוניים", callback_data="menu:xmodel")],
-        [InlineKeyboardButton("⬅ Back", callback_data="menu:back")],
-    ])
+    models = getattr(s, "model_catalog", {}).get("claude") or [
+        ("opus", "Opus (alias)"), ("sonnet", "Sonnet (alias)"), ("haiku", "Haiku (alias)")]
+    buttons = [InlineKeyboardButton(("● " if current == mid else "") + label,
+                                   callback_data=f"model:{mid}") for mid, label in models]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows += [[InlineKeyboardButton("Default", callback_data="model:"),
+              InlineKeyboardButton("🌐 חיצוניים", callback_data="menu:xmodel")],
+             [InlineKeyboardButton("↻ Refresh", callback_data="menu:model"),
+              InlineKeyboardButton("⬅ Back", callback_data="menu:back")]]
+    return InlineKeyboardMarkup(rows)
 
 
 def xmodels_kb() -> InlineKeyboardMarkup:
@@ -993,7 +987,7 @@ async def cmd_engine(update: Update, ctx):
         lines = [f"🔀 engine: *{cur}*"]
         for name, mod in engines.items():
             ok, mode = mod.available()
-            th = mod.thread_for(s.cfg.name)
+            th = mod.thread_for(s.skey)
             lines.append(f"{name}: {'✅ ' + mode if ok else '❌ ' + mode}"
                          + (f" · `{th[:8]}…`" if th else ""))
         lines.append("\n`/engine claude` · `/engine codex` · "
@@ -1001,9 +995,13 @@ async def cmd_engine(update: Update, ctx):
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
         return
 
+    if s.busy:
+        await update.message.reply_text("⏳ יש תשובה בתהליך. החלף מנוע בסיום התשובה.")
+        return
+
     if arg == "reset":
         for mod in engines.values():
-            mod.clear_thread(s.cfg.name)
+            mod.clear_thread(s.skey)
         await update.message.reply_text(
             "threads cleared — next codex/antigravity turn starts fresh")
         return
@@ -1022,6 +1020,8 @@ async def cmd_engine(update: Update, ctx):
             return
 
     s.engine = arg
+    s.handoff.state["engine"] = arg
+    s.handoff.save()
     note = ("\n\nNote: the bridge's own tools (files, memory, scheduling, peers) "
             "and the guard hooks are Claude-side. This engine has its own file "
             "and shell tools, and answers whole rather than streaming."
@@ -1149,11 +1149,11 @@ def _model_picker_text(s) -> str:
     if engine == "antigravity":
         from . import antigravity_engine
         return ("🧠 מודל Antigravity (מנוע פעיל):\n"
-                f"נוכחי: {antigravity_engine.get_model(s.cfg.name) or 'default'}")
+                f"נוכחי: {antigravity_engine.get_model(s.skey) or 'default'}")
     if engine == "codex":
         from . import codex_engine
         return ("🧠 מודל Codex (מנוע פעיל):\n"
-                f"נוכחי: {codex_engine.get_model(s.cfg.name) or 'default'}")
+                f"נוכחי: {codex_engine.get_model(s.skey) or 'default'}")
     return (
         "🧠 בחר מודל שיחה (Claude, מנוי — משתנה מיידית):\n"
         f"נוכחי: {_pretty_model(s.cfg.model) or 'default'}\n"
@@ -1172,6 +1172,8 @@ def _xmodel_picker_text() -> str:
 async def cmd_model(update: Update, ctx):
     """Claude session-model picker (durable, subscription)."""
     s = await _session(update, ctx)
+    from .model_catalog import refresh
+    await refresh(s)
     await update.message.reply_text(
         _model_picker_text(s), reply_markup=model_kb(s))
 
@@ -1718,6 +1720,8 @@ async def on_callback(update: Update, ctx):
                        "restarting session…", panel_kb(s))
         await s.restart(resume=True, note="")
     elif data == "menu:model":
+        from .model_catalog import refresh
+        await refresh(s)
         await _edit(q, _model_picker_text(s), model_kb(s))
     elif data == "menu:xmodel":
         await _edit(q, _xmodel_picker_text(), xmodels_kb())
@@ -1737,29 +1741,35 @@ async def on_callback(update: Update, ctx):
         await _edit(q, text[:4000], kb)
     elif data == "menu:back":
         await _edit(q, "Control panel:", panel_kb(s))
-    elif data.startswith("model:"):
-        model = data.split(":", 1)[1]
-        s.cfg.model = model
-        s.model = model
-        m.save_agents()
-        applied = "live"
-        if s.client and s.connected:
-            try:
-                await s.client.set_model(model or None)
-            except Exception:
-                applied = "after /restart"
+    elif data.startswith(("model:", "amodel:", "cmodel:")):
+        if s.busy:
+            await _edit(q, "⏳ יש תשובה בתהליך. החלף מודל בסיום התשובה.", panel_kb(s))
+            return
+        prefix, mid = data.split(":", 1)
+        expected = {"model": "claude", "amodel": "antigravity", "cmodel": "codex"}[prefix]
+        if s.engine != expected:
+            await _edit(q, "רשימת המודלים שייכת למנוע אחר. פתח /model מחדש.", panel_kb(s))
+            return
+        if expected == "claude":
+            # Apply before saving, so a rejected model does not become a durable pin.
+            if s.client and s.connected:
+                s.busy = True
+                try:
+                    await s.client.set_model(mid or None)
+                except Exception as exc:
+                    await _edit(q, f"❌ לא ניתן להחליף מודל: {exc}", panel_kb(s))
+                    return
+                finally:
+                    s.busy = False
+                    asyncio.create_task(s._drain())
+            s.cfg.model = mid
+            s.model = mid
+            s._last_applied_model = mid
+            m.save_agents()
         else:
-            applied = "after /restart"
-        await _edit(q, f"🧠 model → {model or 'default'} ({applied})", panel_kb(s))
-    elif data.startswith("amodel:"):
-        from . import antigravity_engine
-        mid = data.split(":", 1)[1]
-        antigravity_engine.set_model(s.cfg.name, mid or None)
-        await _edit(q, _model_picker_text(s), model_kb(s))
-    elif data.startswith("cmodel:"):
-        from . import codex_engine
-        mid = data.split(":", 1)[1]
-        codex_engine.set_model(s.cfg.name, mid or None)
+            from . import antigravity_engine, codex_engine
+            mod = codex_engine if expected == "codex" else antigravity_engine
+            mod.set_model(s.skey, mid or None)
         await _edit(q, _model_picker_text(s), model_kb(s))
     elif data.startswith("xmodel:"):
         prov = data.split(":", 1)[1]

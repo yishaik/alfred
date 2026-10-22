@@ -26,6 +26,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from .config import STATE_DIR, load_json, save_json
+
 log = logging.getLogger("bridge.antigravity")
 
 AGY_ROOT = os.environ.get("BRIDGE_AGY_ROOT", r"D:\Projects\agy")
@@ -35,7 +37,15 @@ _TMP = Path(tempfile.gettempdir()) / "bridge-antigravity"
 
 # One conversation per agent (+ last full transcript, to strip the replayed
 # history on resume) so /engine antigravity continues where it left off.
-_state: dict[str, dict] = {}
+_STATE_FILE = STATE_DIR / "antigravity-threads.json"
+_state: dict[str, dict] = load_json(_STATE_FILE, {})
+
+
+def _persist():
+    try:
+        save_json(_STATE_FILE, _state)
+    except OSError:
+        log.exception("could not persist Antigravity thread state")
 
 _USAGE_LIMIT_PHRASES = (
     "usage limit", "quota exceeded", "quota_exceeded", "rate limit exceeded",
@@ -78,6 +88,7 @@ def thread_for(agent: str) -> str | None:
 
 def clear_thread(agent: str) -> None:
     _state.pop(agent, None)
+    _persist()
 
 
 def get_model(agent: str) -> str | None:
@@ -91,16 +102,17 @@ def set_model(agent: str, model: str | None) -> None:
     # takes effect on the next turn.
     st["conv"] = None
     st["transcript"] = ""
+    _persist()
 
 
 _models_cache: list[tuple[str, str]] = []
 
 
-def list_models() -> list[tuple[str, str]]:
+def list_models(refresh: bool = False) -> list[tuple[str, str]]:
     """Antigravity's available models via `agy models` (cached). Rows are
     'id\\tLabel'; the leading 'Fetching…' line has no tab and is skipped."""
     global _models_cache
-    if _models_cache:
+    if _models_cache and not refresh:
         return _models_cache
     try:
         out = subprocess.run([AGY_EXE, "models"], capture_output=True,
@@ -132,4 +144,5 @@ async def run_turn(agent: str, prompt: str, workdir: str,
     if result.conversation_id:
         st["conv"] = result.conversation_id
     st["transcript"] = result.text
+    _persist()
     return tail or "(antigravity returned nothing)", {}
