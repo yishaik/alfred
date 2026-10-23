@@ -47,6 +47,8 @@ def _age_identity(name: str) -> tuple[Path, str]:
     return ident, pub
 
 
+@unittest.skipUnless(shutil.which("age") and shutil.which("age-keygen"),
+                     "age/age-keygen not installed (optional; CI runners lack it)")
 class Sandbox(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
