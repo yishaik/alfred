@@ -1340,10 +1340,13 @@ class AgentSession:
 
     # -- permissions / questions ----------------------------------------------#
     async def _can_use_tool(self, tool_name: str, tool_input: dict, ctx):
-        if self.cfg.read_only and tool_name not in READ_ONLY_TOOLS:
+        bridge_read = tool_name in {f"mcp__bridge__{name}" for name in bridgetools.READ_ONLY}
+        if self.cfg.read_only and tool_name not in READ_ONLY_TOOLS and not bridge_read:
             return PermissionResultDeny(
                 message="[bridge] this orchestration role is read-only; inspect "
                         "and report without changing files or external state")
+        if bridge_read:
+            return PermissionResultAllow()
         # AskUserQuestion: handle here ONLY in approvals mode. In bypass mode the
         # AssistantMessage handler renders it via _legacy_question; handling it
         # here too delivered the question/answer twice (the duplicate-question bug).

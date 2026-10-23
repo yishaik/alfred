@@ -35,6 +35,8 @@ log = logging.getLogger("bridge.tools")
 XREADER_DIR = os.environ.get("BRIDGE_XREADER_DIR", str(Path(WORKDIR) / "x-reader"))
 
 SERVER_NAME = "bridge"
+# Explicit side-effect-free surface shared by SDK and RPC permission policy.
+READ_ONLY = {"list_jobs", "recall", "kb_read", "brain_search", "brain_read"}
 
 # Derived from the tools themselves, not typed out again. Keeping a parallel
 # list by hand meant adding a tool took an edit in three places, and forgetting

@@ -128,6 +128,10 @@ class ToolRPC:
             return {"error": f"no such tool: {name}",
                     "available": sorted(tools)}
         try:
+            from claude_agent_sdk import PermissionResultAllow
+            verdict = await s._can_use_tool(f"mcp__bridge__{name}", args or {}, None)
+            if not isinstance(verdict, PermissionResultAllow):
+                return {"error": getattr(verdict, "message", "tool permission denied")}
             return {"result": await t.handler(args or {})}
         except Exception as e:
             log.warning("tool %s failed: %s", name, e)
