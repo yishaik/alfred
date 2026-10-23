@@ -29,6 +29,7 @@ from pathlib import Path
 PORT = os.environ.get("BRIDGE_TOOLRPC_PORT", "49620")
 BASE = f"http://127.0.0.1:{PORT}"
 AGENT = os.environ.get("BRIDGE_AGENT", "main")
+ROUTE = os.environ.get("BRIDGE_ROUTE", "")
 STATE = Path(os.environ.get("BRIDGE_STATE_DIR", "/home/ubuntu/alfred/state"))
 PROTOCOL = "2024-11-05"
 
@@ -43,7 +44,7 @@ def _token() -> str:
 def _post(path: str, payload: dict, timeout: float = 300.0) -> dict:
     req = urllib.request.Request(
         BASE + path,
-        data=json.dumps({**payload, "agent": AGENT}).encode(),
+        data=json.dumps({**payload, "agent": AGENT, "route": ROUTE}).encode(),
         headers={"content-type": "application/json",
                  "authorization": "Bearer " + _token()},
     )

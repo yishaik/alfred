@@ -246,7 +246,9 @@ async def run_turn(agent: str, prompt: str, workdir: str,
         stderr=asyncio.subprocess.PIPE,
         cwd=workdir,
         start_new_session=os.name != "nt",
-        env={**os.environ, "PATH": os.environ.get("PATH", "") + os.pathsep + str(Path.home() / ".local/bin")},
+        env={**os.environ, "BRIDGE_AGENT": agent.split("@", 1)[0],
+             "BRIDGE_ROUTE": agent, "BRIDGE_STATE_DIR": str(STATE_DIR),
+             "PATH": os.environ.get("PATH", "") + os.pathsep + str(Path.home() / ".local/bin")},
     )
     _running[agent] = asyncio.current_task()
     try:
