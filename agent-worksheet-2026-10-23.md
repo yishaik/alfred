@@ -32,3 +32,5 @@ User explicitly authorized push, separate PRs and ordered merges; supersedes loc
 - [x] #45: /model clears paid one-shot selection before catalog discovery; regression covers cancellation order.
 
 - [x] #46: model keyboards read cache only; discovery runs in a bounded worker thread, coalesces concurrent callers and retains cached results on failure. Unverified fallback IDs removed.
+
+- [x] #47: OpenAI transcription failure falls back to configured Groq; success stops the chain; missing credentials never trigger a request.

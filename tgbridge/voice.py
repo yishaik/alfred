@@ -30,8 +30,10 @@ def available() -> bool:
 
 async def transcribe(path: str) -> str | None:
     if OPENAI_API_KEY:
-        return await _whisper("https://api.openai.com/v1/audio/transcriptions",
-                              OPENAI_API_KEY, "whisper-1", path)
+        result = await _whisper("https://api.openai.com/v1/audio/transcriptions",
+                                OPENAI_API_KEY, "whisper-1", path)
+        if result:
+            return result
     if GROQ_API_KEY:
         return await _whisper("https://api.groq.com/openai/v1/audio/transcriptions",
                               GROQ_API_KEY, "whisper-large-v3-turbo", path)
