@@ -717,7 +717,9 @@ class AgentSession:
         if pin and not text.lstrip().startswith(("!", "/")):
             decision = router.Decision(
                 route="free", task="other", source="forced",
-                reason=f"picker-pinned {pin}", text=text, provider=pin)
+                reason=f"picker-pinned {pin}", text=text,
+                provider="openrouter" if "/" in pin else pin,
+                model_id=pin if "/" in pin else "")
         else:
             decision = await router.classify(text, self)
         # remember a per-turn tier pick for full mode (auto agents only)

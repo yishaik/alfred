@@ -177,3 +177,5 @@ Deferred deliberately on 2026-08-01 — the critical read path is covered.
 - [x] #48 safe test collection and offline CI. See worksheet for validation.
 
 - [x] #49: missing optional Napkin integration is explicitly skipped; mocked transport success/failure and vault isolation are covered. Full pytest and selftest pass.
+
+- [x] #36: dynamic picker separates OpenRouter provider from model ID; paid opt-in and Claude fallback have regression coverage.
