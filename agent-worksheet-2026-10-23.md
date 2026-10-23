@@ -20,3 +20,5 @@ User explicitly authorized push, separate PRs and ordered merges; supersedes loc
 - [x] #39: Codex exports agent, route and state directory to MCP; RPC resolves exact session and rejects unknown/mismatched identities. Legacy known-agent callers remain supported.
 
 - [x] #40: RPC calls the shared session permission gate; explicit read-only bridge tools remain usable; writes require approval or auto-approval and are always denied for read-only roles.
+
+- [x] #41: rejected scheduled turns retain jobs with bounded exponential retry, including recurring occurrences; accepted one-shots are removed.
