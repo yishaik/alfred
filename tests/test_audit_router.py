@@ -42,3 +42,22 @@ def test_dynamic_model_never_enters_automatic_chain(monkeypatch):
     monkeypatch.setattr(router, "_chat", chat)
     assert asyncio.run(router.answer_free("hi", SimpleNamespace(free_history=[]), router.Decision(route="free"))) is None
     chat.assert_not_called()
+
+
+def test_explicit_model_uses_durable_handoff_and_keeps_long_answer(session, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
+    monkeypatch.setattr(router, "load_config", lambda: router.RouterConfig())
+    monkeypatch.setattr(router, "_load_usage", lambda: {"counts": {}})
+    monkeypatch.setattr(router, "_bump_usage", lambda *a: None)
+    monkeypatch.setattr(router, "_log_decision", lambda *a, **k: None)
+    session.handoff.record("claude", "earlier", "durable detail " + "x" * 2000 + " tail decision")
+    session.free_history.clear()
+    answer = "answer " * 400
+    chat = AsyncMock(return_value=answer)
+    monkeypatch.setattr(router, "_chat", chat)
+    decision = router.Decision(route="free", provider="openrouter", model_id="openai/fixture")
+    result = asyncio.run(router.answer_free("continue", session, decision))
+    assert result[0] == answer.strip()
+    sent = chat.call_args.args[3][-1]["content"]
+    assert "durable detail" in sent and "tail decision" in sent
+    assert chat.call_args.kwargs["max_tokens"] == 4096
