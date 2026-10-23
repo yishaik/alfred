@@ -8,3 +8,5 @@ User explicitly authorized push, separate PRs and ordered merges; supersedes loc
 
 ## Completed
 - #48: Safe manual sender import, pytest discovery, registration mock, portable dev dependencies and offline CI. Validation: full pytest and compile checks.
+
+- [x] #49: missing optional Napkin integration is explicitly skipped; mocked transport success/failure and vault isolation are covered. Full pytest and selftest pass.
