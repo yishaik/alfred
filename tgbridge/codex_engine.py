@@ -40,6 +40,7 @@ import json
 import logging
 import os
 import shutil
+import signal
 from pathlib import Path
 
 from .config import STATE_DIR, load_json, save_json
@@ -197,9 +198,46 @@ def _extract(stdout: str) -> tuple[str, str | None, dict, list[str]]:
     return "\n\n".join(parts).strip(), thread, usage, errors
 
 
+_running: dict[str, asyncio.Task] = {}
+
+
+async def interrupt(agent: str) -> bool:
+    task = _running.get(agent)
+    if task is None or task.done() or task is asyncio.current_task():
+        return False
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    return True
+
+
+async def _kill_tree(proc) -> None:
+    # A dedicated POSIX process group also contains tools spawned by Codex.
+    try:
+        if os.name == "nt":
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill", "/PID", str(proc.pid), "/T", "/F",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await killer.wait()
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, OSError):
+        pass
+    if proc.returncode is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+    await proc.wait()
+
+
 async def run_turn(agent: str, prompt: str, workdir: str,
                    timeout: float = 900.0) -> tuple[str, dict]:
     """Run one turn. Returns (reply_text, usage). Raises on process failure."""
+    if agent in _running:
+        raise RuntimeError("Codex turn already running for this route")
     thread = thread_for(agent)
     argv = _argv(prompt, workdir, thread, _models.get(agent) or default_model())
     proc = await asyncio.create_subprocess_exec(
@@ -207,14 +245,19 @@ async def run_turn(agent: str, prompt: str, workdir: str,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=workdir,
+        start_new_session=os.name != "nt",
         env={**os.environ, "PATH": os.environ.get("PATH", "") + os.pathsep + str(Path.home() / ".local/bin")},
     )
+    _running[agent] = asyncio.current_task()
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        raise RuntimeError(f"codex timed out after {int(timeout)}s")
+    except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+        await _kill_tree(proc)
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        raise RuntimeError(f"codex timed out after {int(timeout)}s") from exc
+    finally:
+        _running.pop(agent, None)
 
     text, new_thread, usage, errors = _extract(out.decode("utf-8", "replace"))
     if new_thread:
