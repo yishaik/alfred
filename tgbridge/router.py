@@ -212,7 +212,7 @@ _TIER_MAP = {"light": "haiku", "medium": "claude-sonnet-5", "heavy": "opus",
 
 # Forced tier prefixes -> Anthropic model id (claude path).
 _FORCE_TIER = {"!opus": "opus", "!sonnet": "claude-sonnet-5",
-               "!haiku": "haiku", "!fable": "claude-fable-5"}
+               "!haiku": "haiku", "!fable": "claude-fable-5-1"}
 
 # Forced EXTERNAL provider prefixes -> provider name (free path, pinned to ONE
 # provider). These are PAID via OpenRouter; opt-in only. A pinned external
@@ -570,6 +570,19 @@ async def answer_free(text: str, session, decision: Decision) -> tuple[str, str]
     None → caller falls through to Claude. Never raises. Skips providers whose
     env key is missing, whose per-day budget is spent, or that are RPM-throttled.
     Total wall-clock budget ~45 s."""
+    # --- Jev multi-model router (opt-in: BRIDGE_JEV_ROUTER=1) -----------------
+    # Jev decides the model class -> a subscription model via cliproxy; the answer
+    # is footered with the model used. Any failure falls through to the chain below.
+    try:
+        from . import jev_router as _jev
+        if _jev.enabled():
+            import asyncio as _a
+            r = await _a.to_thread(_jev.answer, text, _history_msgs(session, 6))
+            return (r["answer"] + _jev.footer(r["label"], r["category"], r["confidence"]),
+                    "jev:" + r["label"])
+    except Exception as _e:
+        log.warning("jev_router fell through: %s", _e)
+    # -------------------------------------------------------------------------
     try:
         cfg = load_config()
         counts = _load_usage().get("counts", {})

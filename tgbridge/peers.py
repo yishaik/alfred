@@ -31,6 +31,7 @@ from pathlib import Path
 import httpx
 
 import hmac
+import secrets
 
 from .config import (LEGACY_PEERS, PEER_BIND, PEER_NAME, PEER_PORT,
                      PEER_SELF_TOKEN, PEER_TOKEN, PEER_TOKENS, PEERS)
@@ -38,6 +39,33 @@ from .config import (LEGACY_PEERS, PEER_BIND, PEER_NAME, PEER_PORT,
 log = logging.getLogger("bridge.peers")
 
 _MAX_BODY = 64 * 1024
+# Replay protection: a message carries ts+nonce; we reject stale timestamps
+# and nonces seen within the window. Peers on older code send neither — they
+# are still accepted (logged) unless BRIDGE_PEER_REQUIRE_NONCE=1.
+NONCE_WINDOW_S = 300.0
+REQUIRE_NONCE = os.environ.get("BRIDGE_PEER_REQUIRE_NONCE", "").strip() in ("1", "true", "yes")
+_seen_nonces: dict[str, float] = {}
+
+
+def _nonce_ok(body: dict) -> tuple[bool, str]:
+    nonce = str(body.get("nonce", "") or "")
+    ts = body.get("ts")
+    if not nonce or ts is None:
+        return (not REQUIRE_NONCE), "legacy (no nonce)"
+    try:
+        ts = float(ts)
+    except (TypeError, ValueError):
+        return False, "bad ts"
+    now = time.time()
+    if abs(now - ts) > NONCE_WINDOW_S:
+        return False, f"stale ts ({now - ts:+.0f}s)"
+    for k, t in list(_seen_nonces.items()):          # tiny map; sweep inline
+        if now - t > NONCE_WINDOW_S:
+            _seen_nonces.pop(k, None)
+    if nonce in _seen_nonces:
+        return False, "replayed nonce"
+    _seen_nonces[nonce] = now
+    return True, ""
 
 # Undelivered messages survive a restart of either side: an in-memory queue
 # would be emptied by the very event that most often causes the failure.
@@ -192,7 +220,8 @@ class PeerBus:
             tok = (PEER_TOKENS.get(peer) if peer in LEGACY_PEERS else None) or PEER_SELF_TOKEN
             r = await self._http.post(url + "/msg", json={
                 "token": tok, "from": f"{PEER_NAME}/{src_agent}",
-                "agent": "", "text": text, "hop": hop})
+                "agent": "", "text": text, "hop": hop,
+                "ts": time.time(), "nonce": secrets.token_hex(8)})
             return r.status_code == 200
         except Exception as e:
             log.warning("peer send to %s failed: %s", peer, e)
@@ -250,6 +279,13 @@ class PeerBus:
             if not verified and not legacy_ok:
                 await self._respond(writer, 403, {"ok": False})
                 return
+            fresh, why = _nonce_ok(body)
+            if not fresh:
+                log.warning("peer msg from %r rejected: %s", body.get("from"), why)
+                await self._respond(writer, 403, {"ok": False, "error": why})
+                return
+            if why:
+                log.info("peer msg from %r accepted as %s", body.get("from"), why)
             await self._respond(writer, 200, {"ok": True})
 
             # Identity comes from the token when we can derive it. The claimed

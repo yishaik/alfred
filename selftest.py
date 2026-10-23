@@ -179,6 +179,65 @@ def test_job_skey():
     check("job skey general topic", job_skey("dev", -100123, None) == "dev@t0")
 
 
+class _Msg:
+    def __init__(self, thread_id=None, is_topic=None, forum=False, topic_id=None):
+        self.message_thread_id = thread_id
+        self.is_topic_message = is_topic
+        self.direct_messages_topic = (
+            type("T", (), {"topic_id": topic_id})() if topic_id else None)
+        self.chat = type("C", (), {"is_forum": forum})()
+
+
+def test_route_thread_id():
+    from tgbridge.handlers import _route_thread_id
+    check("plain chat ignores reply-chain id",
+          _route_thread_id(_Msg(thread_id=88)) is None)
+    check("forum topic keeps thread id",
+          _route_thread_id(_Msg(thread_id=3, is_topic=True)) == 3)
+    check("forum chat without flag still keeps thread",
+          _route_thread_id(_Msg(thread_id=7, forum=True)) == 7)
+    check("private Topics via is_topic_message",
+          _route_thread_id(_Msg(thread_id=1, is_topic=True)) == 1)
+    check("direct-messages topic id",
+          _route_thread_id(_Msg(topic_id=9)) == 9)
+    check("missing message", _route_thread_id(None) is None)
+
+
+def test_resolve_route():
+    from tgbridge.manager import AgentManager, resolve_route
+    owner = 7956782005
+    topics = {"12": "research"}
+    agent, skey, tid = resolve_route(
+        owner, 1, owner_id=owner, topics=topics, active="main")
+    check("private General stays on primary session", agent == "main" and skey == "main@p")
+    check("private General keeps delivery thread", tid == 1)
+    agent, skey, tid = resolve_route(
+        owner, 12, owner_id=owner, topics=topics, active="main")
+    check("bound private thread is its own session",
+          agent == "research" and skey == "research@t12" and tid == 12)
+    agent, skey, tid = resolve_route(
+        owner, None, owner_id=owner, topics=topics, active="main",
+        private_thread_id=1)
+    check("remembered private thread used when inbound has none", tid == 1)
+    agent, skey, tid = resolve_route(
+        -100123, None, owner_id=owner, topics=topics, active="main")
+    check("forum General is its own topic session",
+          agent == "main" and skey == "main@t0" and tid is None)
+
+    mem = type("Mem", (), {
+        "topics": topics,
+        "private_thread_id": None,
+        "_cleared_topic_keyboard": True,
+        "remember_private_thread": AgentManager.remember_private_thread,
+        "save_agents": lambda self: None,
+        "_maybe_clear_topic_keyboard": lambda self: None,
+    })()
+    mem.remember_private_thread(1)
+    mem.remember_private_thread(12)
+    check("bound topic does not replace remembered General",
+          mem.private_thread_id == 1)
+
+
 def test_job_retry_on_failure():
     from tgbridge.scheduler import Scheduler
 
@@ -1483,6 +1542,8 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as _td:
         test_watchers(Path(_td))
     test_job_skey()
+    test_route_thread_id()
+    test_resolve_route()
     test_job_retry_on_failure()
     test_metrics()
     test_bridgetools_meta()

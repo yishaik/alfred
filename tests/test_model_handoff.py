@@ -17,7 +17,8 @@ def session(tmp_path, monkeypatch):
     cfg = AgentConfig(name="test-handoff", workdir=str(tmp_path))
     mgr = SimpleNamespace(bot=object(), session_ids={}, active=cfg.name, agents={cfg.name: cfg})
     s = AgentSession(mgr, cfg, "test-handoff@p", 1, 1, None)
-    s.outbox = SimpleNamespace(emit=lambda *a: None, start=lambda: None, muted=False)
+    s.outbox = SimpleNamespace(emit=lambda *a: None, keyboard=lambda *a, **k: None,
+                               start=lambda: None, muted=False)
     s._react = lambda *a: None
     s._maybe_route = AsyncMock(side_effect=lambda text: text)
     s.client = SimpleNamespace(query=AsyncMock(), set_model=AsyncMock())

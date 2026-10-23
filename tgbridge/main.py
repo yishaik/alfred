@@ -81,6 +81,7 @@ BOT_COMMANDS = [
     ("router", "ראוטר מודלים — מצב ושליטה"),
     ("routes", "החלטות ניתוב אחרונות"),
     ("logs", "אזהרות/שגיאות אחרונות"),
+    ("jevcompact", "🗜 קומפקציית Jev"),
 ]
 
 
@@ -142,17 +143,29 @@ async def post_init(app):
     except Exception:
         pass
     s = await m.session_for_agent(m.active)
+    if s.thread_id:
+        try:
+            await app.bot.unhide_general_forum_topic(CHAT_ID)
+        except Exception:
+            log.debug("unhide General topic skipped", exc_info=True)
     try:
+        # Reply keyboards are chat-wide and Telegram hides General when one is
+        # posted into a Topics-enabled private chat. Keep the persistent bar
+        # only until Topics is on; after that the inline panel is enough.
+        online_kb = None if s.thread_id else handlers.quick_kb()
         await app.bot.send_message(
             CHAT_ID,
             f"🎩 Alfred online · agent {m.active} · "
             f"cwd {s.cfg.workdir} · model {s.model or 'default'}\n"
             "Type to chat · /panel for controls · ✨ Features for the rest.",
-            reply_markup=handlers.quick_kb())
+            reply_markup=online_kb,
+            message_thread_id=s.thread_id)
         # The panel goes in a second message: a reply keyboard and an inline
         # keyboard cannot ride on the same one, and the persistent bar is the
         # thing that has to survive — it is what stays under the composer.
-        await app.bot.send_message(CHAT_ID, "controls:", reply_markup=handlers.panel_kb(s))
+        await app.bot.send_message(
+            CHAT_ID, "controls:", reply_markup=handlers.panel_kb(s),
+            message_thread_id=s.thread_id)
     except Exception:
         log.exception("online message failed")
     # a deliberate restart (restart.ps1) leaves this flag; a crash-respawn does
@@ -265,10 +278,14 @@ def main():
     _disable_wmi_platform_lookup()
     rot = RotatingFileHandler(APP_LOG_FILE, maxBytes=5 * 1024 * 1024,
                               backupCount=3, encoding="utf-8")
+    # stderr reaches journald (see supervisor.py): keep it to WARNING+ so the
+    # journal is signal, while the rotating app log keeps the full INFO trail.
+    err = logging.StreamHandler()
+    err.setLevel(logging.WARNING)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        handlers=[logging.StreamHandler(), rot])
+        handlers=[err, rot])
     logging.getLogger("httpx").setLevel(logging.WARNING)
     if not BOT_TOKEN or not CHAT_ID:
         raise SystemExit(
@@ -342,6 +359,7 @@ def main():
         "unwatch": handlers.cmd_unwatch,
         "peers": handlers.cmd_peers,
         "engine": handlers.cmd_engine,
+        "jevcompact": handlers.cmd_jevcompact,
         "audit": handlers.cmd_audit,
         "trace": handlers.cmd_trace,
         "brief": handlers.cmd_brief,
@@ -375,7 +393,10 @@ def main():
     print(f"[bridge] starting — chat={CHAT_ID} group={GROUP_ID or '-'}")
     if not _await_dns():
         raise SystemExit(1)
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    # drop_pending_updates=True threw away every message sent while the
+    # bridge was down (silently). Keep the backlog: Telegram redelivers what we
+    # never acknowledged, and the session queue is persisted separately.
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False)
     # run_polling returns on a clean shutdown. handlers.exit_code is non-zero
     # only when a handler asked to stay down for a while (sustained getUpdates
     # conflict) — the supervisor reads the code and picks its restart delay.

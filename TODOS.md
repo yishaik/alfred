@@ -26,7 +26,7 @@ Consolidated from PLAN-*.md files. Agent: work top-to-bottom; one task at a time
 ### דורש את המשתמש
 - [ ] **`/restart` לאלפרד** — להצטרף ל-peer bus. שני הסוכנים כבר מדברים; אלפרד מצטרף רק אחרי אתחול. לא בוצע אוטומטית כדי לא לנתק שיחה פעילה.
 - [ ] **להחליף את טוקן Supabase `sbp_37f7…`** — הודבק בצ'אט טלגרם ב-2026-08-01, כלומר נמצא בשרתי טלגרם ובלוגים. `supabase login` מחדש לוקח שניות.
-- [ ] **להחליט על Threaded Mode** — כרגע כבוי. דלוק = שרשורים נייטיביים אבל **אפס reply keyboards** (בקשת מיקום/איש קשר/יצירת בוט). כבוי = הכל עובד כרגיל.
+- [x] **Threaded Mode hiding General** — fixed 2026-08-15. Replies now stay in the Topics thread; leftover reply keyboard is removed. Still no reply keyboards while Topics is on (Telegram limitation). See `agent-worksheet-2026-08-15.md`.
 - [ ] **להחליט אם להפעיל `understudy-drain.timer`** — כבוי בכוונה; כל טיק מפעיל את Claude. להפעיל אחרי שתעבור על הריצה לדוגמה.
 
 ### עבודה פתוחה

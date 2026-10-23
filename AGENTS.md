@@ -1,12 +1,17 @@
 # Alfred — AGENTS.md (router)
 
 > Alfred = Telegram ↔ Claude Code bridge. Always-on Python process.
-> Bot: @openrobinbot · locked to chat 7956782005 · autostarts at Windows logon.
-> Live process at D:\Projects\telegram-claude-bridge\ — do NOT restart mid-session.
+> Bot: @AlfredTheTBot · locked to the owner's chat · runs under **systemd** on
+> the Oracle box (Ubuntu 24.04 ARM64) as `alfred.service`, with sibling
+> bridges `alfred-tlvquest.service` and `alfred-storycut.service`.
+> Live code at `/home/ubuntu/alfred/` — do NOT restart mid-session (a restart
+> kills the very Claude process doing the work; schedule it:
+> `sudo systemd-run --on-active=15 systemctl restart alfred.service`).
 
 ## ⚠️ Rules for any agent working here
 1. **Never restart the bridge yourself** — the orchestrator does it after you finish (a restart kills your own process)
-2. After every file change: `.venv/Scripts/python.exe -m py_compile <file>`
+2. After every file change: `python3 -m py_compile <file>`; tests run with
+   `.venv/bin/python selftest.py` (the venv has claude_agent_sdk; system python does not)
 3. Never modify .env token VALUES; you MAY append new keys
 4. One git commit at the end; NO push
 5. Fail-safe is sacred: any error in router/provider → fall through to Claude, never drop a message
@@ -26,11 +31,11 @@
 | Scheduler / reminders | `tgbridge/scheduler.py` |
 | Memory / knowledge | `tgbridge/memory.py`, `tgbridge/napkin_store.py` |
 | Persistent state | `state/` (agents.json, sessions.json, jobs.json, costs.json) |
-| Tests | `selftest.py` — run with `.venv/Scripts/python.exe selftest.py` |
-| Compile-check all | `.venv/Scripts/python.exe -m py_compile tgbridge/*.py` |
+| Tests | `selftest.py` — run with `.venv/bin/python selftest.py`; `tests/` via `.venv/bin/python -m pytest -q tests` |
+| Compile-check all | `python3 -m py_compile tgbridge/*.py` |
 
 ## Module map (one-liners)
-- `bridge.py` — entry shim; keeps autostart bat/vbs working
+- `bridge.py` — entry shim (the .bat/.vbs/.ps1 files in the root are Windows-era leftovers; the live entry is `systemd → supervisor.py → bridge.py`)
 - `supervisor.py` — crash-loop backoff + log rotation; wraps main.py
 - `tgbridge/main.py` — app init, PTB bot setup, all handlers registered
 - `tgbridge/handlers.py` — every Telegram command and message handler

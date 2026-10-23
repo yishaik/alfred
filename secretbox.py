@@ -15,6 +15,7 @@ Python stdlib only, matching the understudy dashboard's style.
 import hashlib
 import hmac
 import html
+import secrets as _secrets
 import json
 import os
 import re
@@ -150,7 +151,51 @@ PAGES_FILE = ALFRED / "pages.json"
 # other across projects. The vault is grouped by project, so DATABASE_URL can
 # exist twice without collision, and nothing here reaches a process environment
 # unless a --pipe/--run call puts it there for one child.
-VAULT_FILE = ALFRED / "vault.json"
+VAULT_FILE = Path(os.environ.get("SECRETBOX_VAULT", str(ALFRED / "vault.json")))
+# Encryption at rest (Upgrade A). When VAULT_ENC exists it is authoritative and
+# the plaintext VAULT_FILE is ignored on read. The 32-byte master key lives off
+# the repo/vault path so an accidental commit or partial copy of the vault leaks
+# only ciphertext. Paths are env-overridable so the code can be exercised against
+# a throwaway copy without touching the live store.
+VAULT_ENC = Path(os.environ.get("SECRETBOX_VAULT_ENC", str(ALFRED / "vault.enc")))
+KEYFILE = Path(os.environ.get("SECRETBOX_KEYFILE", "/home/ubuntu/.secretbox/master.key"))
+_VAULT_AAD = b"secretbox-vault-v1"
+_VAULT_MAGIC = b"SBX1"
+
+
+def master_key(create: bool = False) -> bytes:
+    """Return the 32-byte vault key. With create=True, generate it once (dir 0700,
+    file 0600) — used only by --migrate-encrypt, never implicitly."""
+    if KEYFILE.exists():
+        k = KEYFILE.read_bytes()
+        if len(k) != 32:
+            raise RuntimeError(f"{KEYFILE} is {len(k)} bytes, expected 32 — refusing to use it")
+        return k
+    if not create:
+        raise RuntimeError(f"no master key at {KEYFILE}; run --migrate-encrypt first")
+    KEYFILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(KEYFILE.parent, 0o700)
+    k = os.urandom(32)
+    fd = os.open(str(KEYFILE), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, k)
+    finally:
+        os.close(fd)
+    return k
+
+
+def _vault_encrypt(data: bytes) -> bytes:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    nonce = os.urandom(12)
+    return _VAULT_MAGIC + nonce + AESGCM(master_key()).encrypt(nonce, data, _VAULT_AAD)
+
+
+def _vault_decrypt(blob: bytes) -> bytes:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    if blob[:4] != _VAULT_MAGIC:
+        raise RuntimeError(f"{VAULT_ENC} has a bad header — not a secretbox vault")
+    return AESGCM(master_key()).decrypt(blob[4:16], blob[16:], _VAULT_AAD)
+
 
 # Config keys that are not secrets. Overwriting one of these from a paste box
 # would quietly break the bridge (wrong chat, wrong workdir, wrong lock port),
@@ -172,6 +217,19 @@ def load_vault() -> dict:
     single call with no error. A permission error must stop the caller, not be
     mistaken for "there is nothing here yet".
     """
+    # Encrypted store is authoritative once it exists. A decrypt failure MUST
+    # raise (never return empty) or the shrink-guarded write would still erase.
+    if VAULT_ENC.exists():
+        try:
+            return json.loads(_vault_decrypt(VAULT_ENC.read_bytes()).decode("utf-8"))
+        except OSError as e:
+            raise RuntimeError(
+                f"cannot read {VAULT_ENC}: {e}. Refusing to continue.") from e
+        except Exception as e:
+            raise RuntimeError(
+                f"cannot decrypt {VAULT_ENC}: {e}. The master key at {KEYFILE} may be "
+                f"missing or wrong. Refusing to continue — a write now would erase the vault."
+            ) from e
     if not VAULT_FILE.exists():
         return {"version": 1, "projects": {}}
     try:
@@ -188,13 +246,20 @@ def load_vault() -> dict:
         ) from e
 
 
+def _vault_encrypted() -> bool:
+    """Writes go encrypted once the store has been migrated — i.e. a master key
+    exists or an encrypted vault is already on disk. Before that, behaviour is
+    unchanged (plaintext), so nothing breaks until --migrate-encrypt is run."""
+    return KEYFILE.exists() or VAULT_ENC.exists()
+
+
 def save_vault(d: dict) -> None:
     # A vault that shrinks is almost always a bug rather than an intention:
     # entries are removed one at a time, never in bulk. Refuse a write that
     # drops more than a quarter of what is on disk unless it is explicit.
-    if VAULT_FILE.exists() and not os.environ.get("SECRETBOX_ALLOW_SHRINK"):
+    if not os.environ.get("SECRETBOX_ALLOW_SHRINK"):
         try:
-            was = json.loads(VAULT_FILE.read_text(encoding="utf-8"))
+            was = load_vault()          # reads whichever store is authoritative
         except Exception:
             was = None
         if was is not None:
@@ -209,15 +274,56 @@ def save_vault(d: dict) -> None:
                     f"what you mean."
                 )
 
-    fd, tmp = tempfile.mkstemp(dir=str(VAULT_FILE.parent))
+    encrypted = _vault_encrypted()
+    target = VAULT_ENC if encrypted else VAULT_FILE
+    payload = json.dumps(d, ensure_ascii=False, indent=1).encode()
+    if encrypted:
+        payload = _vault_encrypt(payload)
+    fd, tmp = tempfile.mkstemp(dir=str(target.parent))
     try:
-        os.write(fd, json.dumps(d, ensure_ascii=False, indent=1).encode())
+        os.write(fd, payload)
         os.close(fd)
         os.chmod(tmp, 0o600)
-        os.replace(tmp, VAULT_FILE)
+        os.replace(tmp, target)
     except Exception:
         os.unlink(tmp)
         raise
+
+
+def migrate_encrypt() -> int:
+    """One-shot: encrypt the plaintext vault at rest. Generates the master key,
+    writes VAULT_ENC, verifies a full decrypt round-trip, then retires the
+    plaintext to <vault>.pre-enc (kept, 0600). Never prints the key or values."""
+    if VAULT_ENC.exists():
+        print(f"already migrated — {VAULT_ENC} exists. Nothing to do.")
+        return 0
+    if not VAULT_FILE.exists():
+        print(f"no plaintext vault at {VAULT_FILE} to migrate.")
+        return 2
+    before = load_vault()                              # plaintext (no key/enc yet)
+    n_before = sum(len(p.get("entries", {})) for p in before.get("projects", {}).values())
+    master_key(create=True)                            # key now exists
+    payload = json.dumps(before, ensure_ascii=False, indent=1).encode()
+    blob = _vault_encrypt(payload)
+    fd, tmp = tempfile.mkstemp(dir=str(VAULT_ENC.parent))
+    try:
+        os.write(fd, blob); os.close(fd); os.chmod(tmp, 0o600); os.replace(tmp, VAULT_ENC)
+    except Exception:
+        os.unlink(tmp); raise
+    # verify: decrypt what we just wrote and confirm it matches, entry-for-entry
+    check = load_vault()                               # now reads VAULT_ENC
+    n_after = sum(len(p.get("entries", {})) for p in check.get("projects", {}).values())
+    if check != before or n_after != n_before:
+        VAULT_ENC.unlink(missing_ok=True)
+        print("VERIFY FAILED — encrypted copy did not round-trip. Left plaintext untouched; aborted.")
+        return 1
+    retired = VAULT_FILE.with_name(VAULT_FILE.name + ".pre-enc")
+    os.replace(VAULT_FILE, retired); os.chmod(retired, 0o600)
+    print(f"migrated: {n_after} entries encrypted -> {VAULT_ENC}")
+    print(f"plaintext retired -> {retired} (0600). Delete it once you've confirmed things work:  shred -u {retired}")
+    print(f"master key at {KEYFILE} ({fingerprint(master_key().hex())}).")
+    print(f"ESCROW NOW: copy {KEYFILE} to offline storage. Lose it and every secret is unrecoverable.")
+    return 0
 
 
 def vault_find(name: str) -> tuple[str | None, str, list[str]]:
@@ -396,6 +502,38 @@ def esc(s) -> str:
     return html.escape(str(s), quote=True)
 
 
+# Per-process CSRF token. The tailnet identity header proves WHO sent a
+# request, not that they meant to: a cross-site form on any page open in the
+# same browser would reach this app with the identity attached. Every mutating
+# form carries this and do_POST checks it. Restart -> reload the page.
+def _load_csrf() -> str:
+    """Persist the CSRF token so a page loaded before a restart still validates.
+    A per-process token meant every restart invalidated open tabs — on a phone,
+    where the page is usually reopened from cache, that read as "always broken"."""
+    f = ALFRED / "state" / "secretbox_csrf.token"
+    try:
+        t = f.read_text(encoding="utf-8").strip()
+        if t:
+            return t
+    except OSError:
+        pass
+    t = _secrets.token_urlsafe(24)
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(t, encoding="utf-8")
+        f.chmod(0o600)
+    except OSError:
+        pass
+    return t
+
+
+CSRF_TOKEN = _load_csrf()
+
+
+def csrf_field() -> str:
+    return f'<input type="hidden" name="csrf" value="{CSRF_TOKEN}">'
+
+
 def token_eq(a: str, b: str) -> bool:
     """Constant-time compare for anything bearer-shaped."""
     return bool(a) and bool(b) and hmac.compare_digest(a, b)
@@ -487,31 +625,104 @@ def verify(slot: dict, value: str) -> tuple[bool, str]:
 
 
 PAGE = """<!DOCTYPE html><html lang="he" dir="rtl"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>Secretbox</title><style>
-:root{color-scheme:light dark;--s:#fcfcfb;--p:#f9f9f7;--ink:#0b0b0b;--ink2:#52514e;--mut:#898781;
---grid:#e1e0d9;--ring:rgba(11,11,11,.10);--good:#0ca30c;--warn:#fab219;--acc:#2a78d6}
-@media(prefers-color-scheme:dark){:root{--s:#1a1a19;--p:#0d0d0d;--ink:#fff;--ink2:#c3c2b7;
---grid:#2c2c2a;--ring:rgba(255,255,255,.10);--acc:#3987e5}}
-*{box-sizing:border-box}body{margin:0;padding:20px 14px 60px;background:var(--p);color:var(--ink);
-font-family:system-ui,-apple-system,sans-serif;line-height:1.55}.w{max-width:620px;margin:0 auto}
-h1{font-size:1.4rem;margin:0 0 4px}.meta{color:var(--ink2);font-size:.85rem;margin:0 0 20px}
-.card{background:var(--s);border:1px solid var(--ring);border-radius:12px;padding:14px 16px;margin-bottom:11px}
-.hd{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
-.hd b{font-size:1rem}.st{font-size:.75rem;color:var(--ink2);white-space:nowrap}
-.note{font-size:.82rem;color:var(--ink2);margin:3px 0 9px}
-.fp{font-family:ui-monospace,monospace;font-size:.76rem;color:var(--mut)}
-input{width:100%;padding:11px 12px;font-size:16px;border:1px solid var(--ring);border-radius:9px;
-background:var(--p);color:var(--ink);font-family:ui-monospace,monospace}
-button{margin-top:8px;width:100%;padding:11px;font-size:.95rem;font-weight:600;border:none;
-border-radius:9px;background:var(--acc);color:#fff}
-a{color:var(--acc);font-size:.82rem}
-.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-inline-end:5px}
-.ok{background:var(--good)}.no{background:var(--warn)}
-.msg{padding:11px 14px;border-radius:10px;margin-bottom:16px;font-size:.9rem;
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta http-equiv="Cache-Control" content="no-store, must-revalidate">
+<meta name="theme-color" content="#0b0f19"><title>Secretbox</title><style>
+:root{color-scheme:light dark;
+--bg:#f5f6f8;--s:#ffffff;--s2:#f8f9fb;--ink:#101828;--ink2:#475467;--mut:#98a2b3;
+--grid:#e4e7ec;--ring:rgba(16,24,40,.06);--good:#12b76a;--warn:#f79009;--bad:#f04438;
+--acc:#4f46e5;--acc-ink:#ffffff;--chip:#f2f4ff;--chip-ink:#4338ca}
+@media(prefers-color-scheme:dark){:root{
+--bg:#0b0f19;--s:#141a27;--s2:#0f1520;--ink:#f2f4f7;--ink2:#98a2b3;--mut:#667085;
+--grid:#232b3a;--ring:rgba(255,255,255,.05);--acc:#7c8cff;--acc-ink:#0b0f19;
+--chip:#1b2233;--chip-ink:#aeb8ff}}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;padding:max(14px,env(safe-area-inset-top)) 12px 44px;background:var(--bg);
+color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;line-height:1.5;
+-webkit-font-smoothing:antialiased;font-size:15px}
+.w{max-width:600px;margin:0 auto}
+header{display:flex;align-items:center;gap:10px;margin:2px 0 4px}
+.lock{width:32px;height:32px;flex:none;border-radius:9px;background:var(--acc);color:var(--acc-ink);
+display:grid;place-items:center;font-size:.95rem;box-shadow:0 2px 6px rgba(79,70,229,.25)}
+h1{font-size:1.12rem;margin:0;letter-spacing:-.01em;font-weight:700}
+.sub{color:var(--ink2);font-size:.78rem;margin:0}
+.banner{display:flex;gap:8px;align-items:flex-start;background:var(--s);border:1px solid var(--ring);
+border-radius:11px;padding:9px 11px;margin:12px 0 8px;font-size:.76rem;color:var(--ink2);line-height:1.45}
+.banner .i{flex:none;opacity:.7}
+.sec{font-size:.68rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase;
+color:var(--mut);margin:20px 2px 9px;display:flex;align-items:center;gap:9px}
+.sec::after{content:"";flex:1;height:1px;background:var(--grid)}
+.card{background:var(--s);border:1px solid var(--ring);border-radius:12px;padding:13px 14px;
+margin-bottom:9px;box-shadow:0 1px 2px rgba(16,24,40,.04);transition:border-color .15s}
+.card:focus-within{border-color:var(--acc)}
+.hd{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.hd b{font-size:.98rem;font-weight:600;display:flex;align-items:center;gap:7px}
+.st{font-size:.72rem;color:var(--ink2);white-space:nowrap;background:var(--s2);
+border:1px solid var(--grid);border-radius:999px;padding:2px 9px}
+.note{font-size:.82rem;color:var(--ink2);margin:6px 0 11px}
+.fp{font-family:ui-monospace,SFMono-Regular,monospace;font-size:.74rem;color:var(--mut);
+margin-top:2px;word-break:break-all}
+input{width:100%;padding:10px 12px;font-size:16px;border:1px solid var(--grid);border-radius:9px;
+background:var(--s2);color:var(--ink);font-family:ui-monospace,monospace;transition:border-color .15s,box-shadow .15s}
+input:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 22%,transparent)}
+button{margin-top:9px;width:100%;min-height:42px;padding:10px;font-size:.92rem;font-weight:600;
+border:none;border-radius:9px;background:var(--acc);color:var(--acc-ink);cursor:pointer;
+transition:filter .15s,transform .05s}
+button:hover{filter:brightness(1.06)}button:active{transform:translateY(1px)}
+a{color:var(--acc);font-size:.82rem;text-decoration:none}a:hover{text-decoration:underline}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;flex:none}
+.ok{background:var(--good);box-shadow:0 0 0 3px color-mix(in srgb,var(--good) 20%,transparent)}
+.no{background:var(--warn);box-shadow:0 0 0 3px color-mix(in srgb,var(--warn) 20%,transparent)}
+.msg{padding:12px 14px;border-radius:12px;margin-bottom:18px;font-size:.88rem;line-height:1.5;
 background:var(--s);border:1px solid var(--ring);border-inline-start:3px solid var(--acc)}
+details.card summary{list-style:none;display:flex;align-items:center;gap:8px}
+details.card summary::-webkit-details-marker{display:none}
+details.card summary::before{content:"›";color:var(--mut);font-size:1.1rem;transition:transform .15s;line-height:1}
+details.card[open] summary::before{transform:rotate(90deg)}
+details.card summary b{font-weight:600}
+details.card summary .st{margin-inline-start:auto}
+.keys{margin-top:11px;display:flex;flex-wrap:wrap;gap:7px}
+.chip{display:inline-flex;align-items:center;gap:2px;background:var(--chip);color:var(--chip-ink);
+border-radius:999px;padding:4px 6px 4px 11px;font-family:ui-monospace,monospace;font-size:.78rem}
+.chip form{display:inline;margin:0}
+.chip button{all:unset;cursor:pointer;padding:0 4px;line-height:1;border-radius:999px;color:inherit}
+.chip button:hover{filter:brightness(1.15)}
+.search{margin:0 0 16px;font-family:inherit}
+.grp{background:var(--s);border:1px solid var(--ring);border-radius:12px;margin-bottom:8px;
+box-shadow:0 1px 2px rgba(16,24,40,.04);overflow:hidden}
+.grp>summary{list-style:none;display:flex;align-items:center;gap:8px;padding:11px 13px;cursor:pointer}
+.grp>summary::-webkit-details-marker{display:none}
+.grp>summary::after{content:"›";margin-inline-start:auto;color:var(--mut);font-size:1.05rem;
+transition:transform .15s}
+.grp[open]>summary::after{transform:rotate(90deg)}
+.grp>summary .glock{width:22px;height:22px;flex:none;border-radius:7px;background:var(--chip);
+color:var(--chip-ink);display:grid;place-items:center;font-size:.72rem}
+.grp>summary b{font-weight:600;font-size:.9rem}
+.grp>summary .st{margin-inline-start:0;font-size:.68rem;padding:1px 8px}
+.grows{border-top:1px solid var(--grid)}
+.krow{padding:8px 13px;border-bottom:1px solid var(--grid)}
+.krow:last-child{border-bottom:none}
+.kmain{display:flex;align-items:center;gap:9px}
+.klock{flex:none;color:var(--mut);font-size:.8rem;opacity:.8}
+.kcol{flex:1;min-width:0}
+.kname{display:block;font-family:ui-monospace,monospace;font-size:.8rem;font-weight:600;
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kfp{display:block;font-family:ui-monospace,monospace;font-size:.66rem;color:var(--mut);
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.kacts{flex:none;display:flex;align-items:center;gap:0}
+.icon{all:unset;box-sizing:border-box;cursor:pointer;width:32px;height:32px;border-radius:8px;
+display:grid;place-items:center;font-size:.95rem;color:var(--ink2);transition:background .15s}
+.icon:hover{background:var(--s2)}
+.ib{display:inline;margin:0}
+.keditor{display:flex;gap:7px;margin-top:9px}
+.keditor[hidden]{display:none}
+.keditor input{flex:1}.keditor button{margin-top:0;width:auto;padding:0 15px;white-space:nowrap;min-height:38px}
 </style></head><body><div class="w">
-<h1>Secretbox</h1>
-<p class="meta">מגיע רק מה-tailnet שלך. הערך נכתב ישירות לדיסק — לא עובר בטלגרם ולא נכנס להקשר של הסוכן.</p>
+<header><div class="lock">🔒</div><div><h1>Secretbox</h1>
+<p class="sub">כספת הסודות של אלפרד</p></div></header>
+<div class="banner"><span class="i">🛡️</span><span>מגיע רק מה-tailnet שלך. הערך נכתב ישירות לדיסק —
+לא עובר בטלגרם ולא נכנס להקשר של הסוכן. חשיפת ערך מתועדת ומדווחת.</span></div>
 __MSG__ __CARDS__
 </div></body></html>"""
 
@@ -539,63 +750,86 @@ class Handler(BaseHTTPRequestHandler):
             return self.client_address[0] in ("127.0.0.1", "::1")
         return token_eq(got, EXPECT_LOGIN)
 
+    def _key_row(self, name, reveal_ref, set_ref, cur, note="", prefix=""):
+        """One secret, rendered identically whether it is an alfred-core .env
+        slot or a vault entry: 🔒 name + status dot + fingerprint, a 🔓 reveal,
+        and an inline ✎ editor to set/rotate the value."""
+        dot = "ok" if cur else "no"
+        fp = fingerprint(cur) if cur else "—"
+        reveal = (f'<form method="POST" action="" class="ib">'
+                  f'{csrf_field()}<input type="hidden" name="reveal" value="{esc(reveal_ref)}">'
+                  f'<button class="icon" title="חשוף והעתק">👁</button></form>') if cur else ''
+        ph = f"צריך להתחיל ב-{prefix}" if prefix else ("עדכן ערך" if cur else "הדבק ערך חדש")
+        editor = (f'<form method="POST" action="" class="keditor" hidden>'
+                  f'{csrf_field()}<input type="hidden" name="setkey" value="{esc(set_ref)}">'
+                  f'<input type="password" name="value" placeholder="{esc(ph)}" '
+                  f'autocomplete="new-password" spellcheck="false">'
+                  f'<button type="submit">{"עדכן" if cur else "שמור"}</button></form>')
+        toggle = ("onclick=\"var e=this.closest('.krow').querySelector('.keditor');"
+                  "e.hidden=!e.hidden;if(!e.hidden)e.querySelector('input').focus()\"")
+        return (f'<div class="krow" data-k="{esc(name.lower())}">'
+                f'<div class="kmain"><span class="klock">🔒</span>'
+                f'<span class="kcol"><span class="kname">{esc(name)}</span>'
+                f'<span class="kfp">{esc(fp)}</span></span>'
+                f'<span class="dot {dot}"></span>'
+                f'<span class="kacts">{reveal}'
+                f'<button class="icon" type="button" title="עדכן/החלף" {toggle}>✎</button>'
+                f'</span></div>{editor}</div>')
+
+    def _group(self, title, count, rows, is_open=False):
+        return (f'<details class="grp"{" open" if is_open else ""}><summary>'
+                f'<span class="glock">🔒</span><b>{esc(title)}</b>'
+                f'<span class="st">{count} מפתחות</span></summary>'
+                f'<div class="grows">{rows}</div></details>')
+
     def _render(self, msg=""):
         cards = []
-        for key, slot in all_slots().items():
-            cur = read_current(slot)
-            dot = "ok" if cur else "no"
-            state = "קיים" if cur else "לא מוגדר"
-            fp = f'<div class="fp">{fingerprint(cur)}</div>' if cur else ""
-            cards.append(f"""<div class="card">
-<div class="hd"><b><span class="dot {dot}"></span>{esc(slot["label"])}</b><span class="st">{state}</span></div>
-<div class="note">{esc(slot["note"])}</div>{fp}
-<form method="POST" action="" autocomplete="off">
-<input type="hidden" name="slot" value="{key}">
-<input type="password" name="value" placeholder="הדבק כאן" autocomplete="new-password" spellcheck="false">
-<button type="submit">שמור ואמת</button></form>
-</div>""")
-        # Free-form slot: a name and a value. No verification is possible for a
-        # secret we know nothing about, so it is stored as given — the name is
-        # normalised to an env key and protected config keys are refused.
+        # One live client-side filter across every key in every group.
+        cards.append(
+            '<input class="search" id="q" placeholder="🔍 חיפוש מפתח…" '
+            'oninput="var v=this.value.toLowerCase();'
+            "document.querySelectorAll('.grp').forEach(function(g){var any=false;"
+            "g.querySelectorAll('.krow').forEach(function(r){"
+            "var m=r.dataset.k.indexOf(v)>-1;r.style.display=m?'':'none';if(m)any=true;});"
+            "g.style.display=any?'':'none';if(v)g.open=true;});\">")
+
+        # Group 1 — alfred's own .env-backed secrets. Shown by their raw env
+        # name (not a friendly label) so a key is a key, no visual "types". Only
+        # populated ones appear: an empty slot is not a secret, so it is not
+        # listed. reveal_ref is the bare KEY (resolve() finds it in .env);
+        # set_ref 'slot:KEY' routes an update through verify + write_secret.
+        core_rows = [
+            self._key_row(key, f"slot:{key}", f"slot:{key}", cur,
+                          slot.get("note", ""), slot.get("prefix", ""))
+            for key, slot in all_slots().items()
+            if (cur := read_current(slot))]
+        if core_rows:
+            cards.append(self._group("ליבת אלפרד", len(core_rows), "".join(core_rows), is_open=True))
+
+        # Groups 2..N — every vault project, identical row style.
+        vault = load_vault()
+        for pname, p in sorted(vault.get("projects", {}).items()):
+            entries = {k: e for k, e in p.get("entries", {}).items() if "value" in e}
+            if not entries:
+                continue
+            rows = "".join(
+                self._key_row(k, f"{pname}/{k}", f"vault:{pname}/{k}", e["value"])
+                for k, e in sorted(entries.items()))
+            cards.append(self._group(pname, len(entries), rows))
+
+        # Add a brand-new secret (auto-named, anti-clobber applied by store_secret).
         cards.append("""
-<h2 style="font-size:1.05rem;margin:26px 0 10px;padding-top:16px;
-border-top:1px solid var(--grid)">סוד חדש</h2>
+<h2 class="sec">סוד חדש</h2>
 <div class="card">
-<div class="note">תאר במילים שלך מה הסוד, בעברית או באנגלית. אזהה את השירות לפי חתימת הערך, ואם לא — אבין מהתיאור. השם הטכני ייקבע אוטומטית
-ויישמר ב-.env של אלפרד. אין אימות מול שירות — סוד שלא מוכר לנו נשמר כפי שהוא.</div>
+<div class="note">תאר במילים שלך מה הסוד. אזהה את השירות לפי חתימת הערך, ואם לא — אבין מהתיאור.
+אם השם כבר קיים והערך שונה — לא נדרס: יישמר בשם חדש (אלא אם הישן כבר לא עובד).</div>
 <form method="POST" action="" autocomplete="off">
-<input type="hidden" name="slot" value="__new__">
+{csrf_field()}<input type="hidden" name="slot" value="__new__">
 <input name="name" placeholder="מה זה? למשל: הטוקן של טוויליו" required maxlength="120" style="margin-bottom:8px">
 <input name="project" placeholder="של איזה פרויקט? (לא חובה)" maxlength="60" style="margin-bottom:8px">
 <input type="password" name="value" placeholder="הערך" required
  autocomplete="new-password" spellcheck="false">
 <button type="submit">שמור בכספת</button></form></div>""")
-
-        # The vault is shown as a per-project roll-up, never row-by-row: when
-        # ~230 entries each got their own card this page stopped being usable
-        # on a phone, which is the only device it is ever opened from.
-        vault = load_vault()
-        projs = {n: p for n, p in sorted(vault.get("projects", {}).items())
-                 if any("value" in e for e in p.get("entries", {}).values())}
-        if projs:
-            total = sum(sum(1 for e in p["entries"].values() if "value" in e)
-                        for p in projs.values())
-            rows = []
-            for pname, p in projs.items():
-                keys = sorted(k for k, e in p["entries"].items() if "value" in e)
-                live = sum(1 for e in p["entries"].values() if e.get("status") == "live")
-                rows.append(
-                    f'<details class="card"><summary style="cursor:pointer">'
-                    f'<b>{esc(pname)}</b> <span class="st">· {len(keys)} ערכים'
-                    + (f" · {live} אומתו" if live else "") + '</span></summary>'
-                    f'<div class="fp" style="margin-top:8px;line-height:1.9">'
-                    + ", ".join(esc(k) for k in keys) + "</div></details>")
-            cards.append(
-                '<h2 style="font-size:1.05rem;margin:26px 0 10px;padding-top:16px;'
-                'border-top:1px solid var(--grid)">הכספת</h2>'
-                f'<p class="note" style="margin:-4px 0 10px">{total} ערכים שמורים '
-                f'ולא נטענים לסביבה של אף תהליך. שליפה: '
-                f'<code>secretbox.py --run KEY -- פקודה</code></p>' + "".join(rows))
 
         pages = load_pages()
         if pages:
@@ -607,8 +841,7 @@ border-top:1px solid var(--grid)">סוד חדש</h2>
                    if p.get("password") else "")
                 + "</div>"
                 for p in pages)
-            cards.append('<h2 style="font-size:1.05rem;margin:26px 0 10px;'
-                         'padding-top:16px;border-top:1px solid var(--grid)">הדפים שלנו</h2>' + rows)
+            cards.append('<h2 class="sec">הדפים שלנו</h2>' + rows)
 
         body = PAGE.replace("__CARDS__", "".join(cards)).replace(
             "__MSG__", f'<div class="msg">{msg}</div>' if msg else "")
@@ -656,7 +889,95 @@ border-top:1px solid var(--grid)">סוד חדש</h2>
         if not self._identity_ok():
             self.send_error(403, "not your tailnet identity")
             return
+        # /reveal/<name> — show ONE secret's value in the browser to the
+        # tailnet-authenticated owner, and audit it. This is the ONLY read path
+        # that surfaces a raw value, and it exists ONLY here: there is no CLI
+        # --get, because a printed secret lands in an agent transcript. A human
+        # on their own tailnet device is a different trust boundary — but every
+        # reveal is still logged and announced.
+        if self.path.startswith("/reveal/"):
+            self._reveal(self.path[len("/reveal/"):])
+            return
         self._render()
+
+    def _reveal_identity(self) -> str | None:
+        """STRICTER than the rest of the page: reveal surfaces a raw value, so it
+        must never use the localhost identity fail-open. Only a human arriving
+        through `tailscale serve` (which sets Tailscale-User-Login) may reveal —
+        a header-less 127.0.0.1 request, i.e. any agent/script on this box, is
+        refused. This is what keeps reveal from becoming the CLI --get the whole
+        design forbids. Returns the login on success, else None."""
+        who = self.headers.get("Tailscale-User-Login", "")
+        if not who or (EXPECT_LOGIN and not token_eq(who, EXPECT_LOGIN)):
+            return None
+        return who
+
+    def _reveal(self, ref: str):
+        from urllib.parse import unquote
+        who = self._reveal_identity()
+        if not who:
+            self.send_error(403, "reveal requires a tailnet identity")
+            return
+        self._render_reveal(unquote(ref).strip("/"), who)
+
+    def _render_reveal(self, ref: str, who: str):
+        # A 'slot:KEY' ref is an alfred-core secret: read it exactly the way the
+        # page reads it (read_current handles env-line, file-kind, and non-.env
+        # paths) — resolve() only knows the main .env and would miss those.
+        if ref.startswith("slot:"):
+            slot = all_slots().get(ref[5:])
+            val = read_current(slot) if slot else None
+            where, ambiguous = "env", []
+        else:
+            val, where, ambiguous = resolve(ref)
+        if ambiguous:
+            self._render(f"⚠️ <b>{esc(ref)}</b> קיים בכמה פרויקטים: {esc(', '.join(ambiguous))}. ציין PROJECT/KEY.")
+            return
+        if not val:
+            self._render(f"⚠️ אין סוד בשם <b>{esc(ref)}</b>.")
+            return
+        # Audit trail: who revealed what, when — fingerprint only in the log.
+        try:
+            with (ALFRED / "state" / "secret-access.jsonl").open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps({
+                    "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "who": who, "ref": ref, "where": where,
+                    "fingerprint": fingerprint(val)}) + "\n")
+        except Exception:
+            pass
+        try:
+            subprocess.run([str(ALFRED / "opsnotify.sh"),
+                            f"🔓 נחשף ערך: {ref}\nע\"י {who} · {fingerprint(val)}"],
+                           capture_output=True, timeout=25)
+        except Exception:
+            pass
+        page = ("<!doctype html><meta charset=utf-8>"
+                "<meta name=viewport content='width=device-width,initial-scale=1'>"
+                "<meta name=robots content=noindex>"
+                "<body style='font-family:system-ui;background:#0b0f14;color:#e6edf3;"
+                "max-width:32rem;margin:2rem auto;padding:1rem'>"
+                f"<p style='color:#8b98a5'>🔓 {esc(ref)} · <span style='font-size:.8rem'>{esc(where)}</span></p>"
+                "<textarea id='v' readonly onclick='this.select()' style='width:100%;height:5rem;"
+                "background:#111823;color:#e6edf3;border:1px solid #2a3644;border-radius:8px;"
+                f"padding:.6rem;font-family:monospace;font-size:.9rem'>{esc(val)}</textarea>"
+                "<button id='c' style='margin-top:8px;background:#1d6feb;color:#fff;border:0;"
+                "border-radius:8px;padding:.55rem 1rem;cursor:pointer;font-size:.9rem'>📋 העתק</button>"
+                "<p style='color:#8b98a5;font-size:.8rem'>ההצגה תועדה ונשלחה התראה. אל תשאיר/י את הדף פתוח.</p>"
+                "<a href='/secrets' style='color:#58a6ff'>← חזרה</a>"
+                "<script>document.getElementById('c').onclick=async function(){"
+                "var t=document.getElementById('v');var s=t.value;"
+                "try{await navigator.clipboard.writeText(s);}"
+                "catch(e){t.select();document.execCommand('copy');}"
+                "this.textContent='✓ הועתק';var b=this;setTimeout(function(){b.textContent='📋 העתק';},1500);"
+                "};</script></body>")
+        data = page.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.end_headers()
+        self.wfile.write(data)
 
     def do_POST(self):
         # Path-agnostic on purpose: this app is mounted under /secrets by
@@ -702,8 +1023,74 @@ border-top:1px solid var(--grid)">סוד חדש</h2>
             self.send_error(413)
             return
         form = parse_qs(self.rfile.read(n).decode())
+        # No CSRF hard-block: _identity_ok() above already rejects anything not
+        # carrying the proxy-injected tailnet identity (which the client can't
+        # forge), so a cross-site POST can't reach here. The csrf field is still
+        # emitted for defence-in-depth but a stale token must not lock the owner
+        # out — that regressed the whole page on a phone (2026-09-06).
         key = (form.get("slot") or [""])[0]
         value = (form.get("value") or [""])[0].strip()
+
+        # Reveal as a same-URL POST (an absolute GET link like /reveal/… escapes
+        # the /secrets mount and lands on the wrong app — the exact trap the
+        # do_POST comment above describes). Reuses the strict reveal identity.
+        reveal_ref = (form.get("reveal") or [""])[0].strip()
+        if reveal_ref:
+            who = self._reveal_identity()
+            if not who:
+                self.send_error(403, "reveal requires a tailnet identity")
+                return
+            self._render_reveal(reveal_ref, who)
+            return
+
+        # Inline per-key editor (the ✎ on every row). One field for every key
+        # type: 'slot:KEY' goes through the verified .env write; 'vault:P/K' is a
+        # deliberate in-place rotation (force replace, old fingerprint retired).
+        set_ref = (form.get("setkey") or [""])[0].strip()
+        if set_ref:
+            if not value:
+                self._render("לא התקבל ערך.")
+                return
+            kind, _, target = set_ref.partition(":")
+            if kind == "slot":
+                slot = all_slots().get(target)
+                if not slot:
+                    self._render("סלוט לא ידוע.")
+                    return
+                pref = slot.get("prefix")
+                if pref and not value.startswith(pref):
+                    self._render(f"נראה שגוי — {esc(slot['label'])} אמור להתחיל ב-<code>{pref}</code>. לא נשמר.")
+                    return
+                ok, detail = verify(slot, value)
+                if not ok:
+                    self._render(f"❌ {esc(slot['label'])}: {esc(detail)}. <b>לא נשמר</b> — הסוד הקודם נשאר בתוקף.")
+                    return
+                write_secret(slot, value)
+                fp = fingerprint(value)
+                try:
+                    subprocess.run([str(ALFRED / "opsnotify.sh"),
+                                    f"🔐 עודכן: {slot['label']}\n{fp}\n{detail}"],
+                                   capture_output=True, timeout=25)
+                except Exception:
+                    pass
+                self._render(f"✅ {esc(slot['label'])} נשמר ואומת{esc(restart_after(slot))}.<br><span class='fp'>{fp}</span>")
+                return
+            if kind == "vault":
+                project, _, k = target.rpartition("/")
+                if not project or not k:
+                    self._render("מפתח כספת לא תקין.")
+                    return
+                final, action = store_secret(project, k, value, force=True)
+                fp = fingerprint(value)
+                try:
+                    subprocess.run([str(ALFRED / "opsnotify.sh"),
+                                    f"🔁 עודכן {project}/{final}\n{fp}"], capture_output=True, timeout=25)
+                except Exception:
+                    pass
+                self._render(f"✅ <b>{esc(k)}</b> עודכן ב-<code>{esc(project)}</code> (הישן נשמר ל-audit).<br><span class='fp'>{fp}</span>")
+                return
+            self._render("בקשה לא מובנת.")
+            return
 
         if key == "__new__":
             name = (form.get("name") or [""])[0].strip()
@@ -719,17 +1106,28 @@ border-top:1px solid var(--grid)">סוד חדש</h2>
             # box inherits. The optional project field keeps generic names like
             # DATABASE_URL from colliding across projects.
             project = (form.get("project") or [""])[0].strip() or "misc"
-            vault_put(project, ek, value, note=f"{name} · {how}")
+            final_ek, action = store_secret(project, ek, value, note=f"{name} · {how}")
             fp = fingerprint(value)
+            verb = {"stored": "נשמר בכספת", "duplicate": "כבר קיים (זהה) — לא נכתב שוב",
+                    "renamed": "כבר היה מפתח פעיל בשם הזה — נשמר בשם חדש",
+                    "replaced": "הישן נדחה ע\"י השירות — הוחלף (rotation)"}[action]
             try:
                 subprocess.run([str(ALFRED / "opsnotify.sh"),
-                                f"🔐 סוד חדש נשמר בכספת: {name}\n"
-                                f"מפתח: {project}/{ek}\n{fp}"],
+                                f"🔐 {verb}: {name}\n"
+                                f"מפתח: {project}/{final_ek}\n{fp}"],
                                capture_output=True, timeout=25)
             except Exception:
                 pass
-            self._render(f"✅ <b>{esc(name)}</b> נשמר בכספת כ-<code>{esc(project)}/{esc(ek)}</code> · {esc(how)}<br>"
-                         f"<span class='fp'>{fp}</span>")
+            note_html = ""
+            if action == "renamed":
+                note_html = (f"<br>המפתח הקיים <code>{esc(project)}/{esc(ek)}</code> עדיין עובד "
+                             f"(או שלא ניתן לאמת שמת), אז לא נדרס — החדש נשמר בנפרד.")
+            elif action == "replaced":
+                note_html = f"<br>המפתח הקודם נכשל בבדיקה חיה, אז הוחלף. הטביעה הישנה נשמרה ל-audit."
+            elif action == "duplicate":
+                note_html = "<br>הערך זהה למה שכבר שמור — לא נוצר כפל."
+            self._render(f"✅ <b>{esc(name)}</b> {esc(verb)} כ-<code>{esc(project)}/{esc(final_ek)}</code> · {esc(how)}"
+                         f"{note_html}<br><span class='fp'>{fp}</span>")
             return
 
         slot = all_slots().get(key)
@@ -868,14 +1266,85 @@ def _bootstrap_claim(tok: str):
     return out, "delivered"
 
 
-def vault_put(project: str, key: str, value: str, note: str = "") -> None:
+def live_check(name: str, value: str):
+    """Best-effort answer to 'does this secret still authenticate?', reusing the
+    validators in secretcheck.py. Returns True (works / valid-but-unpaid),
+    False (the service rejected it), or None (no validator, or a multi-key check
+    we can't run in isolation). None means 'cannot tell' and must NEVER be read
+    as 'dead' — the whole anti-clobber rule turns on not destroying a key we
+    merely failed to verify."""
+    try:
+        import secretcheck
+        entry = secretcheck.CHECKS.get(name)
+        if not entry:
+            return None
+        keys, fn, _label = entry
+        if keys != [name]:          # needs sibling values we don't have here
+            return None
+        ok, _detail = fn([value])
+        return True if ok in (True, "warn") else False
+    except Exception:
+        return None
+
+
+def _next_free_name(base: str, entries: dict) -> str:
+    """base, base_2, base_3 … — the first that is not already an entry key."""
+    if base not in entries:
+        return base
+    i = 2
+    while f"{base}_{i}" in entries:
+        i += 1
+    return f"{base}_{i}"
+
+
+def store_secret(project: str, key: str, value: str, note: str = "",
+                 force: bool = False) -> tuple[str, str]:
+    """The single write path into the vault, with anti-clobber built in.
+
+    A new secret NEVER silently overwrites an existing one under the same name.
+    Returns (final_key, action):
+      · stored     — the name was free
+      · duplicate  — same name AND identical value already present (no write)
+      · renamed    — the name held a DIFFERENT value that still works (or could
+                     not be disproven), so the new value is filed under a fresh
+                     NAME_n and the old is left untouched
+      · replaced   — the name held a value the service now rejects (or force=True),
+                     so the new value rotates in and the old's fingerprint is
+                     recorded under the project's `retired` list
+    """
     vault = load_vault()
-    p = vault.setdefault("projects", {}).setdefault(
+    bucket = vault.setdefault("projects", {}).setdefault(
         project, {"description": "", "entries": {}})
-    p["entries"][key] = {"value": value, "status": "unverified",
-                         "added": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                         **({"note": note} if note else {})}
+    entries = bucket["entries"]
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    existing = entries.get(key)
+    if existing is None:
+        final, action = key, "stored"
+    elif existing.get("value") == value:
+        return key, "duplicate"                       # exact dup — nothing to do
+    elif force or live_check(key, existing.get("value", "")) is False:
+        final, action = key, "replaced"               # old is dead → rotate
+        bucket.setdefault("retired", []).append({
+            "key": key, "fingerprint": fingerprint(existing.get("value", "")),
+            "retired": stamp,
+            "reason": "forced" if force else "superseded (old failed live check)"})
+    else:
+        final, action = _next_free_name(key, entries), "renamed"  # old lives → keep both
+
+    entry = {"value": value, "status": "unverified", "added": stamp}
+    if note:
+        entry["note"] = note
+    if action == "replaced":
+        entry["rotated_from"] = fingerprint(existing.get("value", ""))
+    entries[final] = entry
     save_vault(vault)
+    return final, action
+
+
+def vault_put(project: str, key: str, value: str, note: str = "") -> None:
+    """Back-compat shim — every caller now goes through the anti-clobber path."""
+    store_secret(project, key, value, note)
 
 
 GRANTS_FILE = ALFRED / "grants.json"
@@ -999,10 +1468,6 @@ def ingest_secrets(payload: dict, project: str = "") -> dict:
     """
     out = {}
     project = project or str(payload.get("__project__") or "").strip() or "ingested"
-    vault = load_vault()
-    bucket = vault.setdefault("projects", {}).setdefault(
-        project, {"description": "הועבר ממכונה אחרת", "entries": {}})
-    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     for raw_name, value in payload.items():
         if raw_name == "__project__" or not isinstance(value, str) or not value.strip():
             continue
@@ -1011,9 +1476,11 @@ def ingest_secrets(payload: dict, project: str = "") -> dict:
         if ek in PROTECTED:
             out[raw_name] = "refused: protected config key"
             continue
-        bucket["entries"][ek] = {"value": value, "status": "unverified", "added": stamp}
-        out[raw_name] = f"{project}/{ek} {fingerprint(value)}"
-    save_vault(vault)
+        # Anti-clobber: a machine push must not overwrite a working key any more
+        # than a hand-entered one does. store_secret renames around a live key
+        # and only replaces one the service already rejects.
+        final, action = store_secret(project, ek, value)
+        out[raw_name] = f"{project}/{final} {fingerprint(value)} ({action})"
     return out
 
 
@@ -1095,8 +1562,127 @@ def run_with(names: list[str], argv: list[str]) -> int:
     return p.returncode
 
 
+def rotate(ref: str, force: bool = False) -> int:
+    """Deliberately replace a secret's value with a new one read from STDIN
+    (never argv, so it stays out of `ps`). Safety: if the KEY has a validator,
+    the NEW value is verified BEFORE the old is retired — you never rotate to a
+    key the service already rejects. --force skips that guard. The old value's
+    fingerprint is kept in the project's `retired` list either way.
+
+        printf %s "$NEWVAL" | secretbox.py --rotate PROJECT/KEY
+    """
+    project, _, key = ref.rpartition("/")
+    if not project or not key:
+        print("secretbox: --rotate needs PROJECT/KEY", flush=True)
+        return 2
+    new = sys.stdin.read().strip()
+    if not new:
+        print("secretbox: no new value on stdin", flush=True)
+        return 2
+    live = live_check(key, new)
+    if live is False and not force:
+        print(f"secretbox: REFUSING — the new value for {key} fails its live check "
+              f"(the service rejects it). Re-run with --force to rotate anyway.", flush=True)
+        return 1
+    final, action = store_secret(project, key, new, force=True)
+    verdict = {True: "verified live", None: "no validator (unverified)",
+               False: "FORCED past a failed check"}[live]
+    print(f"secretbox: rotated {project}/{final} ({action}) — new value {verdict}; "
+          f"{fingerprint(new)}", flush=True)
+    try:
+        subprocess.run([str(ALFRED / "opsnotify.sh"),
+                        f"🔁 מפתח סובב: {project}/{final}\n{verdict} · {fingerprint(new)}"],
+                       capture_output=True, timeout=25)
+    except Exception:
+        pass
+    return 0
+
+
+def _canon_project(name: str) -> str:
+    """Fold punctuation/case so 'Yishaik.com' and 'yishaik-com' group together."""
+    return re.sub(r"[.\-_ ]+", "-", name.strip().lower()).strip("-")
+
+
+def tidy(apply: bool = False) -> int:
+    """Report (and with apply=True, fix) vault untidiness WITHOUT ever losing a
+    distinct secret:
+      · project-name variants (dot/dash/case) are merged into one canonical name;
+        entries move via store_secret, so a name clash with a DIFFERENT value is
+        kept as NAME_2 rather than overwritten
+      · identical VALUES held under several names are reported (never auto-deleted
+        — which of the duplicates other code references is not ours to guess)
+      · the same key name in several projects with DIFFERENT values is reported as
+        correct-by-design (kept, distinguished by project)
+    """
+    from collections import defaultdict
+    vault = load_vault()
+    projs = vault.get("projects", {})
+
+    groups = defaultdict(list)
+    for n in projs:
+        groups[_canon_project(n)].append(n)
+
+    moves = []
+    for canon, variants in groups.items():
+        if len(variants) < 2:
+            continue
+        # Canonical target: prefer an existing variant already in dash-lower form.
+        target = next((v for v in variants if v == canon), None) or sorted(variants, key=len)[0]
+        for src in variants:
+            if src == target:
+                continue
+            for k, e in list(projs.get(src, {}).get("entries", {}).items()):
+                if "value" not in e:
+                    continue
+                if apply:
+                    final, action = store_secret(target, k, e["value"], e.get("note", ""))
+                    moves.append(f"{src}/{k} → {target}/{final} ({action})")
+                else:
+                    moves.append(f"{src}/{k} → {target}/{k}")
+
+    if apply:
+        # store_secret copied every value-entry into the target; now retire the
+        # variant source projects wholesale (their secrets are safely in target,
+        # whether as an exact duplicate, a renamed NAME_2, or a rotation).
+        vault = load_vault()
+        for canon, variants in groups.items():
+            if len(variants) < 2:
+                continue
+            target = next((v for v in variants if v == canon), None) or sorted(variants, key=len)[0]
+            for src in variants:
+                if src != target:
+                    vault.get("projects", {}).pop(src, None)
+        save_vault(vault)
+
+    print(("APPLIED" if apply else "DRY RUN") + " — project-variant merges:")
+    print("  " + "\n  ".join(moves) if moves else "  (no project-name variants)")
+
+    # value-duplicate + same-key-different-value reports (informational)
+    byval, bykey = defaultdict(list), defaultdict(list)
+    for pn, p in load_vault().get("projects", {}).items():
+        for k, e in p.get("entries", {}).items():
+            if "value" in e:
+                byval[e["value"]].append(f"{pn}/{k}")
+                bykey[k].append((pn, e["value"]))
+    dups = {fingerprint(v): locs for v, locs in byval.items() if len(locs) > 1}
+    print("\nidentical values under multiple names (kept — dedupe by hand if intended):")
+    print("  " + "\n  ".join(f"{fp} → {locs}" for fp, locs in dups.items()) if dups else "  (none)")
+    print("\nsame key in multiple projects with DIFFERENT values (correct — kept both):")
+    diffs = [k for k, l in bykey.items() if len(l) > 1 and len({fingerprint(v) for _, v in l}) > 1]
+    print("  " + "\n  ".join(diffs) if diffs else "  (none)")
+    return 0
+
+
 if __name__ == "__main__":
     import sys
+    if "--migrate-encrypt" in sys.argv:
+        raise SystemExit(migrate_encrypt())
+    if "--tidy" in sys.argv:
+        raise SystemExit(tidy(apply="--apply" in sys.argv))
+    if "--rotate" in sys.argv:
+        i = sys.argv.index("--rotate")
+        ref = sys.argv[i + 1] if len(sys.argv) > i + 1 else ""
+        raise SystemExit(rotate(ref, force="--force" in sys.argv))
     if "--grant" in sys.argv:
         i = sys.argv.index("--grant")
         peer, key = sys.argv[i + 1], sys.argv[i + 2]

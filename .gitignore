@@ -41,6 +41,16 @@ grants.json
 bootstrap-claims.jsonl
 .secret-migration/
 
+# --- secret material: never commit (added by tailnet security audit 2026-09-24) ---
+vault.enc
+vault.enc.*
+vault.json*
+*.pre-enc
+.*_key
+*.key
+*.pem
+.secretbox/
+
 # Secret-ingest helper (holds credentials) and transient watchdog/selftest logs.
 .ingest-secrets.mjs
 watchdog.log

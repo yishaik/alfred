@@ -50,9 +50,29 @@ def _from_bot(msg) -> bool:
     return bool(msg and msg.from_user and msg.from_user.is_bot)
 
 
+def _route_thread_id(msg) -> int | None:
+    """Forum / private-Topics thread id, or None for a plain unthreaded chat.
+
+    Telegram still sets message_thread_id on ordinary reply chains. Those are
+    not Topics and must not be treated as a delivery target — posting into a
+    reply-chain id creates a hidden thread and makes General disappear.
+    """
+    if not msg:
+        return None
+    if getattr(msg, "is_topic_message", None):
+        return msg.message_thread_id
+    topic = getattr(msg, "direct_messages_topic", None)
+    if topic is not None and getattr(topic, "topic_id", None):
+        return topic.topic_id
+    chat = getattr(msg, "chat", None)
+    if chat is not None and getattr(chat, "is_forum", False):
+        return msg.message_thread_id
+    return None
+
+
 def _route(update: Update) -> tuple[int, int | None]:
     msg = update.effective_message
-    return update.effective_chat.id, msg.message_thread_id if msg else None
+    return update.effective_chat.id, _route_thread_id(msg)
 
 
 async def _session(update: Update, ctx):
@@ -362,6 +382,13 @@ async def cmd_brainbot(update: Update, ctx):
     if not needs_creation():
         await update.message.reply_text("🧠 בוט ה־Second Brain כבר הוגדר.")
         return
+    s = await _session(update, ctx)
+    if s.thread_id:
+        await update.message.reply_text(
+            "Threaded mode is on — Telegram only offers bot creation as a "
+            "reply keyboard, which hides the General topic. Turn Topics off "
+            "in this chat (or use a non-Topics chat) and run /brainbot again.")
+        return
     await update.message.reply_text(
         "לחץ על הכפתור — Telegram ייצור ויחבר את הבוט אוטומטית:",
         reply_markup=request_keyboard())
@@ -396,8 +423,11 @@ async def on_managed_bot_created(update: Update, ctx):
         "✅ מוכן. הבוט מחפש ומסביר, קולט לינקים דרך X Reader, מטמיע אותם "
         "ומעדכן את אתר here.now.", reply_markup=kb)
     # one_time_keyboard hides the request button but does NOT bring back what
-    # it replaced, so the composer would be left bare. Put the bar back.
-    await update.message.reply_text("↩️", reply_markup=quick_kb())
+    # it replaced, so the composer would be left bare. Put the bar back —
+    # unless Topics is on, where a reply keyboard hides General.
+    s = await _session(update, ctx)
+    if not s.thread_id:
+        await update.message.reply_text("↩️", reply_markup=quick_kb())
 
 
 async def cmd_panel(update: Update, ctx):
@@ -750,8 +780,14 @@ async def cmd_secretary(update: Update, ctx):
 
 def _valid_dir(path: str) -> bool:
     import os
+    import re
     from .config import is_dangerous_workdir
     if is_dangerous_workdir(path):   # block drive roots, Windows, network shares
+        return False
+    # A Windows path on POSIX is not a path at all: os.makedirs happily creates
+    # a directory literally named "D:\projects\LinkedIn" (found on the Oracle
+    # box, 2026-09-04). Refuse it instead of manufacturing garbage.
+    if os.name != "nt" and (re.match(r"^[A-Za-z]:[\\/]", path) or "\\" in path):
         return False
     if os.path.isdir(path):
         return True
@@ -1068,6 +1104,32 @@ async def cmd_engine(update: Update, ctx):
         notice = ""
     text, kb = card(s, notice)
     await update.message.reply_text(text, reply_markup=kb)
+
+
+async def cmd_jevcompact(update: Update, ctx):
+    """Advisory Jev instant-compaction: score this session's tool calls for relevance
+    to the latest objective and report what could be pruned + token savings."""
+    import asyncio
+    from pathlib import Path
+    from . import jev_compact
+    s = await _session(update, ctx)
+    sid = getattr(s, "session_id", None)
+    if not sid:
+        await update.message.reply_text("אין עדיין טרנסקריפט לסשן הזה — שלח כמה הודעות קודם.")
+        return
+    try:
+        from claude_agent_sdk import project_key_for_directory
+        path = (Path.home() / ".claude" / "projects"
+                / project_key_for_directory(s.cfg.workdir) / f"{sid}.jsonl")
+    except Exception as e:
+        await update.message.reply_text(f"לא הצלחתי לאתר טרנסקריפט: {str(e)[:120]}")
+        return
+    if not path.exists():
+        await update.message.reply_text("קובץ הטרנסקריפט לא נמצא עדיין.")
+        return
+    await update.message.reply_text("🗜 מנתח את ההקשר עם Jev…")
+    txt = await asyncio.to_thread(jev_compact.report, str(path))
+    await update.message.reply_text(txt, parse_mode="Markdown")
 
 
 async def cmd_trace(update: Update, ctx):
@@ -1573,7 +1635,7 @@ async def on_edited(update: Update, ctx):
     if _from_bot(msg):   # anti-loop: ignore edits authored by another bot
         return
     s = await mgr(ctx).session_for_route(update.effective_chat.id,
-                                         msg.message_thread_id)
+                                         _route_thread_id(msg))
     if msg.message_id == s.last_user_msg_id and s.busy:
         await s.interrupt()
         await s.submit(f"[the user corrected their message; use this version instead] "
@@ -1706,6 +1768,35 @@ async def on_voice(update: Update, ctx):
 # --------------------------------------------------------------------------- #
 # Callbacks
 # --------------------------------------------------------------------------- #
+# buttons that change agent/bridge state: admin only (see config.is_admin)
+_PRIV_CB = ("act:restart", "act:auto", "act:secretary", "model:", "xmodel:",
+            "voi:", "agn", "ags:", "agr:", "agx:", "agX:", "rt:", "job:cancel:",
+            "feat:", "menu:router", "menu:agents", "cmodel:", "amodel:", "eng:")
+
+
+def _admin_user(update: Update) -> bool:
+    from .config import is_admin
+    # No user (fakes, channel posts) → is_admin(None): allowed only when no
+    # admin list is configured. The group=-1 authorize gate runs first anyway.
+    return is_admin(getattr(getattr(update, "effective_user", None), "id", None))
+
+
+def admin_only(fn):
+    """Wrap a command handler so non-admin users in the group get a polite
+    refusal instead of the owner's controls."""
+    import functools
+
+    @functools.wraps(fn)
+    async def wrapped(update: Update, ctx):
+        if not _admin_user(update):
+            msg = update.effective_message
+            if msg:
+                await msg.reply_text("🔒 admin only")
+            return
+        return await fn(update, ctx)
+    return wrapped
+
+
 async def _apply_model_choice(q, s, m, prefix, mid, *, bound=False):
     if s.busy:
         await _edit(q, "⏳ יש תשובה בתהליך. החלף מודל בסיום התשובה.", panel_kb(s))
@@ -1746,6 +1837,9 @@ async def on_callback(update: Update, ctx):
         return
     m = mgr(ctx)
     data = q.data or ""
+    if data.startswith(_PRIV_CB) and not _admin_user(update):
+        await q.answer("🔒 admin only", show_alert=True)
+        return
     await q.answer()
 
     # session-scoped callbacks carry a sid: pm/qp/qt/qd/qo/bt/qq
@@ -1767,8 +1861,7 @@ async def on_callback(update: Update, ctx):
         await _session_cb(q, s, tag, parts[2:])
         return
 
-    chat_id, thread_id = update.effective_chat.id, \
-        q.message.message_thread_id if q.message else None
+    chat_id, thread_id = update.effective_chat.id, _route_thread_id(q.message)
     s = await m.session_for_route(chat_id, thread_id)
 
     if data in ("send:/engine", "menu:engine"):
@@ -2163,3 +2256,16 @@ async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE):
             CHAT_ID, f"⚠️ bridge error: {type(err).__name__}: {str(err)[:300]}")
     except Exception as e:
         log.debug("error notice send failed: %s", e)
+
+
+# Privileged commands: state-changing or sensitive. Applied here so main.py's
+# command table needs no change and any new handler added to this list is
+# gated the same way.
+for _name in ("cmd_restart", "cmd_stop", "cmd_kill", "cmd_newagent", "cmd_delagent",
+              "cmd_auto", "cmd_cwd", "cmd_bind", "cmd_engine", "cmd_model",
+              "cmd_models", "cmd_logs", "cmd_audit", "cmd_backup", "cmd_watch",
+              "cmd_unwatch", "cmd_router", "cmd_routes", "cmd_soul",
+              "cmd_secretary", "cmd_proactive", "cmd_brainbot", "cmd_loop",
+              "cmd_bg", "cmd_fork", "cmd_merge", "cmd_branch"):
+    if _name in globals():
+        globals()[_name] = admin_only(globals()[_name])

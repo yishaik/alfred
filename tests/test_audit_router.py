@@ -12,7 +12,8 @@ def session(tmp_path, monkeypatch):
     cfg = AgentConfig(name="audit", workdir=str(tmp_path))
     mgr = SimpleNamespace(bot=object(), session_ids={}, active="audit", agents={"audit": cfg})
     s = AgentSession(mgr, cfg, "audit@p", 1, 1, None)
-    s.outbox = SimpleNamespace(emit=lambda *a: None, start=lambda: None, muted=False)
+    s.outbox = SimpleNamespace(emit=lambda *a: None, keyboard=lambda *a, **k: None,
+                               start=lambda: None, muted=False)
     s._react = lambda *a: None
     return s
 

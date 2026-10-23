@@ -37,6 +37,7 @@ from telegram.constants import ChatAction
 from . import (antigravity_engine, bridgetools, codex_engine, guards, markers,
                router, voice)
 import os
+import re
 
 from . import metrics
 from .config import (BOT_TURNS_PER_HOUR, CHAT_ID, CLAUDE_BIN,
@@ -66,7 +67,7 @@ def _pretty_model(m: str) -> str:
     low = (m or "").lower()
     for key, label in (
             ("opus-5", "Opus 5"), ("opus-4-8", "Opus 4.8"), ("opus-4-7", "Opus 4.7"),
-            ("sonnet-5", "Sonnet 5"), ("fable-5", "Fable 5"),
+            ("sonnet-5", "Sonnet 5"), ("fable-5-1", "Fable 5.1"), ("fable-5", "Fable 5"),
             ("opus", "Opus"), ("sonnet", "Sonnet"),
             ("haiku", "Haiku"), ("fable", "Fable")):
         if key in low:
@@ -198,6 +199,27 @@ class TurnSource:
     kind: str = "user"          # user | bot | sched
     hop: int = 0
     origin: str = ""            # who sent it (bot/peer name)
+
+
+_SECRET_ENV_RX = re.compile(r"(TOKEN|_KEY|SECRET|PASSWORD|PASSWD)", re.IGNORECASE)
+_SECRET_ENV_KEEP = ("ANTHROPIC_", "CLAUDE_")
+
+
+def _scrubbed_secrets() -> dict[str, str]:
+    """The bridge's .env credentials (bot tokens, OpenAI/Groq/Gemini keys,
+    Supabase…) were inherited by every `claude` subprocess and therefore by
+    every Bash command it ran — anything the model was talked into could just
+    `echo $OPENAI_API_KEY`. The SDK merges options.env over os.environ, so the
+    only way to hide a key from the child is to override it with an empty
+    string. Anthropic/Claude vars are left alone (auth); a session that needs
+    a secret runs the command through secretbox --run."""
+    out = {}
+    for k in os.environ:
+        if k.startswith(_SECRET_ENV_KEEP):
+            continue
+        if _SECRET_ENV_RX.search(k):
+            out[k] = ""
+    return out
 
 
 class AgentSession:
@@ -377,7 +399,8 @@ class AgentSession:
             # from our own os.environ for the handshake timeout — config.py sets
             # it there too, which is what actually extends the 60s init window.
             env={"TEMP": str(TMP_DIR), "TMP": str(TMP_DIR),
-                 "CLAUDE_CODE_STREAM_CLOSE_TIMEOUT": CLAUDE_INIT_TIMEOUT_MS},
+                 "CLAUDE_CODE_STREAM_CLOSE_TIMEOUT": CLAUDE_INIT_TIMEOUT_MS,
+                 **_scrubbed_secrets()},
         )
 
     def _ensure_workdir(self):
@@ -471,6 +494,37 @@ class AgentSession:
         tail = " ".join(self.stderr_tail).lower()
         return "no conversation found" in tail
 
+    # -- pending-queue persistence ------------------------------------------ #
+    # Queued turns used to live only in memory: every restart (systemd, crash,
+    # /restart) silently dropped whatever the user had sent while Claude was
+    # busy. The queue is now mirrored to state/pending.json on every change
+    # and re-fed after the session comes back.
+    def persist_pending(self) -> None:
+        try:
+            self.mgr.save_pending(self.skey, [
+                {"text": t, "kind": src.kind, "hop": src.hop, "origin": src.origin}
+                for t, src in self.pending])
+        except Exception as e:
+            log.warning("persist pending failed for %s: %s", self.skey, e)
+
+    def _restore_pending(self) -> int:
+        try:
+            items = self.mgr.load_pending(self.skey)
+        except Exception as e:
+            log.warning("load pending failed for %s: %s", self.skey, e)
+            return 0
+        have = {t for t, _ in self.pending}
+        n = 0
+        for it in items:
+            text = str(it.get("text", ""))
+            if not text or text in have:
+                continue
+            self.pending.append((text, TurnSource(
+                kind=str(it.get("kind", "user")), hop=int(it.get("hop", 0)),
+                origin=str(it.get("origin", "")))))
+            n += 1
+        return n
+
     async def _start_locked(self, resume: bool = True, fork: bool = False):
         if self.connected and self.client:
             return                       # a racing path already brought us up
@@ -504,6 +558,14 @@ class AgentSession:
         if self._watchdog is None or self._watchdog.done():
             self._watchdog = asyncio.create_task(self._watchdog_loop())
         log.info("session %s started (resume=%s)", self.skey, self.session_id)
+        restored = self._restore_pending()
+        if restored:
+            self.outbox.emit(f"♻️ re-queued {restored} message(s) that were "
+                             "waiting before the restart")
+        if self.pending:
+            # not under the life lock: _drain -> _send_turn may need start()
+            asyncio.get_running_loop().call_soon(
+                lambda: asyncio.create_task(self._drain()))
 
     async def start(self, resume: bool = True, fork: bool = False):
         async with self._life_lock:
@@ -515,6 +577,11 @@ class AgentSession:
         await self._cancel_tasks(*self._input_tasks)
         self._input_tasks.clear()
         self.connected = False
+        if self.busy and self.turn_source.kind == "user" and self._turn_input_text:
+            cut = self._turn_input_text.replace("\n", " ")[:80]
+            self.outbox.emit(f"⚠️ the restart cut this message mid-turn: «{cut}» "
+                             "— Claude may not have finished it; resend if needed")
+        self.persist_pending()
         # unblock anything waiting on the user / on a captured turn, or the
         # question lock, the can_use_tool callback and collect() would hang
         # forever across a restart.
@@ -631,8 +698,14 @@ class AgentSession:
                 self.outbox.emit("🚦 התור מלא — ההודעה לא נקלטה. נסה שוב בסיום התשובה.")
                 return False
             self.pending.append((text, source))
+            self.persist_pending()
             if source.kind == "user":
-                self.outbox.emit(f"⏳ queued (#{len(self.pending)} in line)")
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+                    f"🗑 Clear queue ({len(self.pending)})",
+                    callback_data=f"qq:{self.sid}:0")]])
+                self.outbox.keyboard(
+                    f"⏳ queued (#{len(self.pending)} in line) — "
+                    "/interrupt to cut in", kb)
             return True
         if source.kind != "user" and not self.bot_turn_bucket.allow():
             self.outbox.emit(f"🚦 dropped {source.kind} turn (rate limit)")
@@ -793,9 +866,15 @@ class AgentSession:
             decision = await router.classify(text, self)
         # remember a per-turn tier pick for full mode (auto agents only)
         if decision.route == "claude":
-            if (decision.tier
-                    and router.load_config().agent_mode(self.cfg.name) == "full"
-                    and self.cfg.model == ""):
+            # An explicit !opus/!fable/!haiku prefix (source == "forced") is
+            # the user overriding for ONE turn and must work even when the
+            # agent has a pinned model — it was a silent no-op for pinned
+            # agents until 2026-09-04. The classifier's automatic tier pick
+            # still only applies to auto agents (model == "") in full mode.
+            if decision.tier and (
+                    decision.source == "forced"
+                    or (router.load_config().agent_mode(self.cfg.name) == "full"
+                        and self.cfg.model == "")):
                 self._turn_model = decision.tier
             # prompt-refinement stage: rewrite task-shaped prompts before Claude
             # sees them. Fully wrapped — any failure falls through to the original
@@ -915,6 +994,7 @@ class AgentSession:
                 log.error("start failed for %s on send: %s | stderr: %s",
                           self.skey, e, self.stderr_gist() or "(empty)")
                 self.pending.appendleft((text, source))
+                self.persist_pending()
                 self._fail_capture(f"can't start Claude: {e}")
                 self._react("😱")
                 self._ensure_reconnect()   # backed-off retry so it won't stall
@@ -936,12 +1016,15 @@ class AgentSession:
         # router (full mode): apply a per-turn tier for auto agents. Never touch
         # cfg.model (a persistent pin stays authoritative). Guarded — a set_model
         # failure just proceeds on whatever model is already loaded.
-        if self._turn_model and self._turn_model != self._last_applied_model:
+        # A per-turn override is for that turn only: restore the agent's own
+        # model afterwards (previously the override stuck until the next one).
+        want = self._turn_model or self.cfg.model
+        if want != self._last_applied_model and (self._turn_model or self._last_applied_model):
             try:
-                await self.client.set_model(self._turn_model or None)
-                self._last_applied_model = self._turn_model
+                await self.client.set_model(want or None)
+                self._last_applied_model = want
             except Exception as e:
-                log.debug("per-turn set_model(%s) failed: %s", self._turn_model, e)
+                log.debug("per-turn set_model(%s) failed: %s", want, e)
         self._turn_model = ""
         # mood: prepend a one-line tone nudge only when the weather has shifted
         # (pop_nudge returns "" if unchanged) so we never spam the turn stream.
@@ -966,6 +1049,7 @@ class AgentSession:
             self.outbox.emit(f"⚠️ couldn't send to Claude (message kept in "
                              f"queue): {e} — reconnecting…")
             self.pending.appendleft((text, source))
+            self.persist_pending()
             self._fail_capture(f"send failed: {e}")
             self._react("😱")
             self._ensure_reconnect()
@@ -973,6 +1057,7 @@ class AgentSession:
     async def _drain(self):
         if self.pending and not self.busy:
             text, source = self.pending.popleft()
+            self.persist_pending()
             await self.feed(text, source)
 
     # -- output ---------------------------------------------------------------#

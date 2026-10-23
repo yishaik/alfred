@@ -37,7 +37,12 @@ def load_env() -> dict:
     almost everything as "not set" and quietly stop verifying anything."""
     env = {}
     try:
-        vault = json.loads(VAULT_FILE.read_text(encoding="utf-8"))
+        # Through secretbox, not VAULT_FILE directly: since the vault moved to
+        # encrypted vault.enc the plaintext file no longer exists, and reading
+        # it here silently dropped the checker to .env-only coverage.
+        sys.path.insert(0, str(ALFRED))
+        import secretbox
+        vault = secretbox.load_vault()
         for proj in vault.get("projects", {}).values():
             for key, entry in proj.get("entries", {}).items():
                 if "value" in entry:
@@ -231,7 +236,32 @@ def check_one(name):
     return name, label, ok, detail
 
 
+def coverage(argv):
+    """Which stored secrets does this checker actually verify, and which are
+    blind spots? Age and a green inventory say nothing about validity; this
+    names every secret with NO round-trip validator so the gap is visible
+    instead of assumed-covered."""
+    env = load_env()
+    stored = sorted(env)
+    checked = [n for n in stored if n in CHECKS]
+    blind = [n for n in stored if n not in CHECKS]
+    if "--json" in argv:
+        print(json.dumps({"checked": checked, "unverified": blind,
+                          "coverage": f"{len(checked)}/{len(stored)}"}, ensure_ascii=False, indent=1))
+        return 0
+    print(f"\n🔎 כיסוי אימות: {len(checked)}/{len(stored)} סודות ניתנים לבדיקה\n")
+    print(f"✅ יש validator ({len(checked)}):")
+    for n in checked:
+        print(f"   {n}")
+    print(f"\n○ אין validator — לא ניתן לאמת ({len(blind)}):")
+    for n in blind:
+        print(f"   {n}")
+    return 0
+
+
 def main(argv):
+    if "--coverage" in argv:
+        return coverage(argv)
     want = [a for a in argv if not a.startswith("-")]
     names = [n for n in CHECKS if not want or n in want or
              any(w.lower() in n.lower() for w in want)]
