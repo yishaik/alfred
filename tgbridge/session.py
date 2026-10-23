@@ -300,6 +300,7 @@ class AgentSession:
         # message is answered by this external (paid, opt-in) provider, then the
         # pin clears. "" = no pin. Explicit prefixes (!gpt/!glm) bypass this.
         self._external_pin: str = ""
+        self._input_tasks: set[asyncio.Task] = set()
 
     def _prefix(self) -> str:
         # label output whenever "who is talking" isn't obvious: any group/topic
@@ -507,6 +508,8 @@ class AgentSession:
     async def _stop_locked(self):
         self._stopping = True
         await codex_engine.interrupt(self.skey)
+        await self._cancel_tasks(*self._input_tasks)
+        self._input_tasks.clear()
         self.connected = False
         # unblock anything waiting on the user / on a captured turn, or the
         # question lock, the can_use_tool callback and collect() would hang
@@ -577,6 +580,38 @@ class AgentSession:
         await self.restart(resume=True, note="")
 
     # -- input ----------------------------------------------------------------#
+    async def submit(self, text: str, source: TurnSource | None = None,
+                     echo: bool = False) -> bool:
+        """Admit Telegram input without holding PTB's sequential update loop.
+
+        feed() remains awaitable for scheduler and internal collect callers.
+        Tasks belong to this session and are cancelled on stop/restart.
+        """
+        if self.busy:
+            return await self.feed(text, source, echo)
+        task = asyncio.create_task(self.feed(text, source, echo))
+        self._input_tasks.add(task)
+
+        def finished(done):
+            self._input_tasks.discard(done)
+            if done.cancelled():
+                self.busy = False
+                self._fail_capture("turn cancelled")
+                if not self._stopping and self.pending:
+                    drain = asyncio.create_task(self._drain())
+                    self._input_tasks.add(drain)
+                    drain.add_done_callback(finished)
+            elif done.exception():
+                log.error("input task failed for %s", self.skey,
+                          exc_info=done.exception())
+                self.busy = False
+                self._fail_capture("input task failed")
+                self.outbox.emit("⚠️ Turn failed; please retry.")
+        task.add_done_callback(finished)
+        # Let feed reserve busy before a second update can be admitted.
+        await asyncio.sleep(0)
+        return True
+
     async def feed(self, text: str, source: TurnSource | None = None,
                    echo: bool = False) -> bool:
         source = source or TurnSource()

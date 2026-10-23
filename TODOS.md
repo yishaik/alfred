@@ -181,3 +181,5 @@ Deferred deliberately on 2026-08-01 — the critical read path is covered.
 - [x] #36: dynamic picker separates OpenRouter provider from model ID; paid opt-in and Claude fallback have regression coverage.
 
 - [x] #38: cancel/timeout/stop reap Codex process trees; intentional cancellation never replays to Claude. Real local subprocess regression tests added.
+
+- [x] #37: Telegram submits owned background tasks while feed/collect remain awaitable; FIFO, prompt responsiveness and shutdown cancellation tested.
