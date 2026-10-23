@@ -176,14 +176,15 @@ def model_kb(current: str) -> InlineKeyboardMarkup:
     def lbl(name, val):
         return ("● " if current == val else "") + name
     # Claude models = the durable SESSION model (subscription, set_model live).
-    # Pinned dateless ids (Opus 5, Opus 4.8, Sonnet 5, Fable 5); Haiku stays the
+    # Pinned dateless ids (Opus 5.5, Opus 5, Sonnet 5, Fable 5); Haiku stays the
     # evergreen alias. External (paid) models live in a SEPARATE picker
     # (🌐 חיצוניים) because they can't be a session model.
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(lbl("Opus 5", "claude-opus-5"), callback_data="model:claude-opus-5"),
-         InlineKeyboardButton(lbl("Opus 4.8", "claude-opus-4-8"), callback_data="model:claude-opus-4-8")],
-        [InlineKeyboardButton(lbl("Sonnet 5", "claude-sonnet-5"), callback_data="model:claude-sonnet-5"),
-         InlineKeyboardButton(lbl("Fable 5.1", "claude-fable-5-1"), callback_data="model:claude-fable-5-1"),
+        [InlineKeyboardButton(lbl("Opus 5.5", "claude-opus-5-5"), callback_data="model:claude-opus-5-5"),
+         InlineKeyboardButton(lbl("Opus 5", "claude-opus-5"), callback_data="model:claude-opus-5")],
+        [InlineKeyboardButton(lbl("Sonnet 5.5", "claude-sonnet-5-5"), callback_data="model:claude-sonnet-5-5"),
+         InlineKeyboardButton(lbl("Sonnet 5", "claude-sonnet-5"), callback_data="model:claude-sonnet-5")],
+        [InlineKeyboardButton(lbl("Fable 5.1", "claude-fable-5-1"), callback_data="model:claude-fable-5-1"),
          InlineKeyboardButton(lbl("Haiku", "haiku"), callback_data="model:haiku")],
         [InlineKeyboardButton(lbl("Default", ""), callback_data="model:"),
          InlineKeyboardButton("🌐 חיצוניים", callback_data="menu:xmodel")],
@@ -1055,12 +1056,21 @@ async def cmd_engine(update: Update, ctx):
     if not arg:
         ok, mode = codex_engine.available()
         thread = codex_engine.thread_for(s.cfg.name)
+        cur = getattr(s, "engine", "claude")
+        # Tappable provider picker (send: callbacks feed the command). Only offer
+        # providers that are actually available; codex is gated on availability.
+        def _lbl(name, emoji):
+            return ("✓ " if cur == name else "") + emoji + " " + name
+        row = [InlineKeyboardButton(_lbl("claude", "🟣"), callback_data="send:/engine claude")]
+        if ok:
+            row.append(InlineKeyboardButton(_lbl("codex", "🟢"), callback_data="send:/engine codex"))
+        rows = [row, [InlineKeyboardButton("♻️ reset codex thread", callback_data="send:/engine reset")]]
         await update.message.reply_text(
-            f"🔀 engine: *{getattr(s, 'engine', 'claude')}*\n"
+            f"🔀 engine: *{cur}*\n"
             f"codex: {'✅ ' + mode if ok else '❌ ' + mode}\n"
             + (f"codex thread: `{thread[:8]}…`\n" if thread else "")
-            + "\n`/engine claude` · `/engine codex` · `/engine reset` (new codex thread)",
-            parse_mode="Markdown")
+            + "\nבחר ספק:",
+            parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
         return
 
     if arg == "reset":
@@ -1086,6 +1096,32 @@ async def cmd_engine(update: Update, ctx):
             "shell tools, and answers whole rather than streaming."
             if arg == "codex" else "")
     await update.message.reply_text(f"🔀 engine → *{arg}*{note}", parse_mode="Markdown")
+
+
+async def cmd_jevcompact(update: Update, ctx):
+    """Advisory Jev instant-compaction: score this session's tool calls for relevance
+    to the latest objective and report what could be pruned + token savings."""
+    import asyncio
+    from pathlib import Path
+    from . import jev_compact
+    s = await _session(update, ctx)
+    sid = getattr(s, "session_id", None)
+    if not sid:
+        await update.message.reply_text("אין עדיין טרנסקריפט לסשן הזה — שלח כמה הודעות קודם.")
+        return
+    try:
+        from claude_agent_sdk import project_key_for_directory
+        path = (Path.home() / ".claude" / "projects"
+                / project_key_for_directory(s.cfg.workdir) / f"{sid}.jsonl")
+    except Exception as e:
+        await update.message.reply_text(f"לא הצלחתי לאתר טרנסקריפט: {str(e)[:120]}")
+        return
+    if not path.exists():
+        await update.message.reply_text("קובץ הטרנסקריפט לא נמצא עדיין.")
+        return
+    await update.message.reply_text("🗜 מנתח את ההקשר עם Jev…")
+    txt = await asyncio.to_thread(jev_compact.report, str(path))
+    await update.message.reply_text(txt, parse_mode="Markdown")
 
 
 async def cmd_trace(update: Update, ctx):

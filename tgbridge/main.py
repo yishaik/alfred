@@ -78,6 +78,7 @@ BOT_COMMANDS = [
     ("router", "ראוטר מודלים — מצב ושליטה"),
     ("routes", "החלטות ניתוב אחרונות"),
     ("logs", "אזהרות/שגיאות אחרונות"),
+    ("jevcompact", "🗜 קומפקציית Jev"),
 ]
 
 
@@ -344,6 +345,7 @@ def main():
         "unwatch": handlers.cmd_unwatch,
         "peers": handlers.cmd_peers,
         "engine": handlers.cmd_engine,
+        "jevcompact": handlers.cmd_jevcompact,
         "audit": handlers.cmd_audit,
         "trace": handlers.cmd_trace,
         "brief": handlers.cmd_brief,

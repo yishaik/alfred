@@ -151,7 +151,51 @@ PAGES_FILE = ALFRED / "pages.json"
 # other across projects. The vault is grouped by project, so DATABASE_URL can
 # exist twice without collision, and nothing here reaches a process environment
 # unless a --pipe/--run call puts it there for one child.
-VAULT_FILE = ALFRED / "vault.json"
+VAULT_FILE = Path(os.environ.get("SECRETBOX_VAULT", str(ALFRED / "vault.json")))
+# Encryption at rest (Upgrade A). When VAULT_ENC exists it is authoritative and
+# the plaintext VAULT_FILE is ignored on read. The 32-byte master key lives off
+# the repo/vault path so an accidental commit or partial copy of the vault leaks
+# only ciphertext. Paths are env-overridable so the code can be exercised against
+# a throwaway copy without touching the live store.
+VAULT_ENC = Path(os.environ.get("SECRETBOX_VAULT_ENC", str(ALFRED / "vault.enc")))
+KEYFILE = Path(os.environ.get("SECRETBOX_KEYFILE", "/home/ubuntu/.secretbox/master.key"))
+_VAULT_AAD = b"secretbox-vault-v1"
+_VAULT_MAGIC = b"SBX1"
+
+
+def master_key(create: bool = False) -> bytes:
+    """Return the 32-byte vault key. With create=True, generate it once (dir 0700,
+    file 0600) — used only by --migrate-encrypt, never implicitly."""
+    if KEYFILE.exists():
+        k = KEYFILE.read_bytes()
+        if len(k) != 32:
+            raise RuntimeError(f"{KEYFILE} is {len(k)} bytes, expected 32 — refusing to use it")
+        return k
+    if not create:
+        raise RuntimeError(f"no master key at {KEYFILE}; run --migrate-encrypt first")
+    KEYFILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(KEYFILE.parent, 0o700)
+    k = os.urandom(32)
+    fd = os.open(str(KEYFILE), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, k)
+    finally:
+        os.close(fd)
+    return k
+
+
+def _vault_encrypt(data: bytes) -> bytes:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    nonce = os.urandom(12)
+    return _VAULT_MAGIC + nonce + AESGCM(master_key()).encrypt(nonce, data, _VAULT_AAD)
+
+
+def _vault_decrypt(blob: bytes) -> bytes:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    if blob[:4] != _VAULT_MAGIC:
+        raise RuntimeError(f"{VAULT_ENC} has a bad header — not a secretbox vault")
+    return AESGCM(master_key()).decrypt(blob[4:16], blob[16:], _VAULT_AAD)
+
 
 # Config keys that are not secrets. Overwriting one of these from a paste box
 # would quietly break the bridge (wrong chat, wrong workdir, wrong lock port),
@@ -173,6 +217,19 @@ def load_vault() -> dict:
     single call with no error. A permission error must stop the caller, not be
     mistaken for "there is nothing here yet".
     """
+    # Encrypted store is authoritative once it exists. A decrypt failure MUST
+    # raise (never return empty) or the shrink-guarded write would still erase.
+    if VAULT_ENC.exists():
+        try:
+            return json.loads(_vault_decrypt(VAULT_ENC.read_bytes()).decode("utf-8"))
+        except OSError as e:
+            raise RuntimeError(
+                f"cannot read {VAULT_ENC}: {e}. Refusing to continue.") from e
+        except Exception as e:
+            raise RuntimeError(
+                f"cannot decrypt {VAULT_ENC}: {e}. The master key at {KEYFILE} may be "
+                f"missing or wrong. Refusing to continue — a write now would erase the vault."
+            ) from e
     if not VAULT_FILE.exists():
         return {"version": 1, "projects": {}}
     try:
@@ -189,13 +246,20 @@ def load_vault() -> dict:
         ) from e
 
 
+def _vault_encrypted() -> bool:
+    """Writes go encrypted once the store has been migrated — i.e. a master key
+    exists or an encrypted vault is already on disk. Before that, behaviour is
+    unchanged (plaintext), so nothing breaks until --migrate-encrypt is run."""
+    return KEYFILE.exists() or VAULT_ENC.exists()
+
+
 def save_vault(d: dict) -> None:
     # A vault that shrinks is almost always a bug rather than an intention:
     # entries are removed one at a time, never in bulk. Refuse a write that
     # drops more than a quarter of what is on disk unless it is explicit.
-    if VAULT_FILE.exists() and not os.environ.get("SECRETBOX_ALLOW_SHRINK"):
+    if not os.environ.get("SECRETBOX_ALLOW_SHRINK"):
         try:
-            was = json.loads(VAULT_FILE.read_text(encoding="utf-8"))
+            was = load_vault()          # reads whichever store is authoritative
         except Exception:
             was = None
         if was is not None:
@@ -210,15 +274,56 @@ def save_vault(d: dict) -> None:
                     f"what you mean."
                 )
 
-    fd, tmp = tempfile.mkstemp(dir=str(VAULT_FILE.parent))
+    encrypted = _vault_encrypted()
+    target = VAULT_ENC if encrypted else VAULT_FILE
+    payload = json.dumps(d, ensure_ascii=False, indent=1).encode()
+    if encrypted:
+        payload = _vault_encrypt(payload)
+    fd, tmp = tempfile.mkstemp(dir=str(target.parent))
     try:
-        os.write(fd, json.dumps(d, ensure_ascii=False, indent=1).encode())
+        os.write(fd, payload)
         os.close(fd)
         os.chmod(tmp, 0o600)
-        os.replace(tmp, VAULT_FILE)
+        os.replace(tmp, target)
     except Exception:
         os.unlink(tmp)
         raise
+
+
+def migrate_encrypt() -> int:
+    """One-shot: encrypt the plaintext vault at rest. Generates the master key,
+    writes VAULT_ENC, verifies a full decrypt round-trip, then retires the
+    plaintext to <vault>.pre-enc (kept, 0600). Never prints the key or values."""
+    if VAULT_ENC.exists():
+        print(f"already migrated — {VAULT_ENC} exists. Nothing to do.")
+        return 0
+    if not VAULT_FILE.exists():
+        print(f"no plaintext vault at {VAULT_FILE} to migrate.")
+        return 2
+    before = load_vault()                              # plaintext (no key/enc yet)
+    n_before = sum(len(p.get("entries", {})) for p in before.get("projects", {}).values())
+    master_key(create=True)                            # key now exists
+    payload = json.dumps(before, ensure_ascii=False, indent=1).encode()
+    blob = _vault_encrypt(payload)
+    fd, tmp = tempfile.mkstemp(dir=str(VAULT_ENC.parent))
+    try:
+        os.write(fd, blob); os.close(fd); os.chmod(tmp, 0o600); os.replace(tmp, VAULT_ENC)
+    except Exception:
+        os.unlink(tmp); raise
+    # verify: decrypt what we just wrote and confirm it matches, entry-for-entry
+    check = load_vault()                               # now reads VAULT_ENC
+    n_after = sum(len(p.get("entries", {})) for p in check.get("projects", {}).values())
+    if check != before or n_after != n_before:
+        VAULT_ENC.unlink(missing_ok=True)
+        print("VERIFY FAILED — encrypted copy did not round-trip. Left plaintext untouched; aborted.")
+        return 1
+    retired = VAULT_FILE.with_name(VAULT_FILE.name + ".pre-enc")
+    os.replace(VAULT_FILE, retired); os.chmod(retired, 0o600)
+    print(f"migrated: {n_after} entries encrypted -> {VAULT_ENC}")
+    print(f"plaintext retired -> {retired} (0600). Delete it once you've confirmed things work:  shred -u {retired}")
+    print(f"master key at {KEYFILE} ({fingerprint(master_key().hex())}).")
+    print(f"ESCROW NOW: copy {KEYFILE} to offline storage. Lose it and every secret is unrecoverable.")
+    return 0
 
 
 def vault_find(name: str) -> tuple[str | None, str, list[str]]:
@@ -1570,6 +1675,8 @@ def tidy(apply: bool = False) -> int:
 
 if __name__ == "__main__":
     import sys
+    if "--migrate-encrypt" in sys.argv:
+        raise SystemExit(migrate_encrypt())
     if "--tidy" in sys.argv:
         raise SystemExit(tidy(apply="--apply" in sys.argv))
     if "--rotate" in sys.argv:

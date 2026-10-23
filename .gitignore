@@ -39,3 +39,13 @@ vault.json
 grants.json
 bootstrap-claims.jsonl
 .secret-migration/
+
+# --- secret material: never commit (added by tailnet security audit 2026-09-24) ---
+vault.enc
+vault.enc.*
+vault.json*
+*.pre-enc
+.*_key
+*.key
+*.pem
+.secretbox/

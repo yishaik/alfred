@@ -37,7 +37,12 @@ def load_env() -> dict:
     almost everything as "not set" and quietly stop verifying anything."""
     env = {}
     try:
-        vault = json.loads(VAULT_FILE.read_text(encoding="utf-8"))
+        # Through secretbox, not VAULT_FILE directly: since the vault moved to
+        # encrypted vault.enc the plaintext file no longer exists, and reading
+        # it here silently dropped the checker to .env-only coverage.
+        sys.path.insert(0, str(ALFRED))
+        import secretbox
+        vault = secretbox.load_vault()
         for proj in vault.get("projects", {}).values():
             for key, entry in proj.get("entries", {}).items():
                 if "value" in entry:
