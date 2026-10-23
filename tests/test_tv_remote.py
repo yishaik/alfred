@@ -226,11 +226,11 @@ def test_open_remote_does_not_start_model_session():
 def test_ordinary_ok_remains_a_chat_message():
     async def scenario():
         update, ctx, remote = update_context(text="OK")
-        session = SimpleNamespace(questions={}, feed=AsyncMock())
+        session = SimpleNamespace(questions={}, submit=AsyncMock())
         with patch.object(handlers, "_session", AsyncMock(return_value=session)):
             handlers._SEEN_MSGS.clear()
             await handlers.on_text(update, ctx)
-        assert session.feed.await_args.args[0] == "OK"
+        assert session.submit.await_args.args[0] == "OK"
         remote.execute.assert_not_awaited()
     run(scenario())
 

@@ -1334,7 +1334,7 @@ async def cmd_cr(update: Update, ctx):
     """Code-review mini-app (#21): a shortcut to the /code-review skill."""
     s = await _session(update, ctx)
     args = " ".join(ctx.args or []).strip()
-    await s.feed(f"/code-review {args}".strip(), echo=True)
+    await s.submit(f"/code-review {args}".strip(), echo=True)
 
 
 async def cmd_research(update: Update, ctx):
@@ -1345,7 +1345,7 @@ async def cmd_research(update: Update, ctx):
         await update.message.reply_text(
             "usage: /research <question> — I'll run a deep, cited research pass.")
         return
-    await s.feed(
+    await s.submit(
         "Use the deep-research skill to research this thoroughly and return a "
         f"cited report: {q}")
 
@@ -1359,7 +1359,7 @@ async def cmd_plan(update: Update, ctx):
     jobs = m.scheduler.list_jobs() if m.scheduler else []
     agenda = build_agenda(jobs, _t.time()) or "Nothing scheduled in the next 24h."
     extra = " ".join(ctx.args or []).strip()
-    await s.feed(
+    await s.submit(
         "[daily plan] Build me a focused, realistically-ordered plan for today "
         "— what to tackle first and why. Ask at most one clarifying question, "
         "only if truly needed.\n\n"
@@ -1513,7 +1513,7 @@ async def _run_quick(update: Update, ctx, entry) -> None:
     kind, target = entry
     if kind == "send":
         s = await _session(update, ctx)
-        await s.feed(target, echo=True)
+        await s.submit(target, echo=True)
         return
     fn = globals().get(f"cmd_{target}")
     if not fn:
@@ -1560,7 +1560,7 @@ async def on_text(update: Update, ctx):
     if r and (r.text or r.caption) and not text.startswith("/"):
         text = f"[replying to: «{(r.text or r.caption)[:300]}»]\n{text}"
     s.last_user_msg_id = msg.message_id
-    await s.feed(text, TurnSource(), echo=msg.text.startswith("/"))
+    await s.submit(text, TurnSource(), echo=msg.text.startswith("/"))
 
 
 async def on_edited(update: Update, ctx):
@@ -1573,10 +1573,10 @@ async def on_edited(update: Update, ctx):
                                          msg.message_thread_id)
     if msg.message_id == s.last_user_msg_id and s.busy:
         await s.interrupt()
-        await s.feed(f"[the user corrected their message; use this version instead] "
+        await s.submit(f"[the user corrected their message; use this version instead] "
                      f"{msg.text}")
     else:
-        await s.feed(f"[the user edited an earlier message; updated version:] "
+        await s.submit(f"[the user edited an earlier message; updated version:] "
                      f"{msg.text}")
 
 
@@ -1597,7 +1597,7 @@ async def on_reaction(update: Update, ctx):
         m = mgr(ctx)
         for s in list(m.sessions.values()):
             if s.chat_id == mr.chat.id and not s.busy:
-                await s.feed(
+                await s.submit(
                     "[user reacted 🔁 — please redo/retry your last response "
                     "with a different approach]", TurnSource())
                 return
@@ -1654,7 +1654,7 @@ async def on_media(update: Update, ctx):
             try:
                 await e["msg"].reply_text(
                     f"📎 album: {len(e['items'])} files saved → Claude")
-                await e["s"].feed(combined)
+                await e["s"].submit(combined)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -1666,14 +1666,14 @@ async def on_media(update: Update, ctx):
         return
 
     await msg.reply_text(f"📎 saved → {safe} → Claude")
-    await s.feed(note + (f"\n{cap}" if cap else ""))
+    await s.submit(note + (f"\n{cap}" if cap else ""))
 
 
 async def on_location(update: Update, ctx):
     s = await _session(update, ctx)
     loc = update.message.location
     await update.message.reply_text("📍 → Claude")
-    await s.feed(f"[received location: lat={loc.latitude:.6f}, "
+    await s.submit(f"[received location: lat={loc.latitude:.6f}, "
                  f"lon={loc.longitude:.6f}]")
 
 
@@ -1692,12 +1692,12 @@ async def on_voice(update: Update, ctx):
     text = await voice.transcribe(str(path))
     if text:
         await msg.reply_text(f"🎙 “{text[:500]}”")
-        await s.feed(text)
+        await s.submit(text)
     else:
         note = ("no transcription API configured (set OPENAI_API_KEY or "
                 "GROQ_API_KEY)" if not voice.available() else "transcription failed")
         await msg.reply_text(f"⚠️ {note}; passing the file to Claude")
-        await s.feed(f"[received voice note (untranscribed): {path}]")
+        await s.submit(f"[received voice note (untranscribed): {path}]")
 
 
 # --------------------------------------------------------------------------- #
@@ -1774,7 +1774,7 @@ async def on_callback(update: Update, ctx):
         text, kb = card(s)
         await _edit(q, text, kb)
     elif data.startswith("send:"):
-        await s.feed(data[5:], echo=True)
+        await s.submit(data[5:], echo=True)
     elif data == "act:interrupt":
         await s.interrupt()
     elif data == "act:restart":
@@ -2047,7 +2047,7 @@ async def _session_cb(q, s, tag: str, rest: list[str]):
             await q.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
-        await s.feed(labels[idx], echo=True)
+        await s.submit(labels[idx], echo=True)
 
 
 async def _handle_page_cb(q, s, page_id: int, page_num: int):
