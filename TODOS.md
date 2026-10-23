@@ -195,3 +195,5 @@ Deferred deliberately on 2026-08-01 — the critical read path is covered.
 - [x] #43: shared CODEX_HOME resolver for auth, config and model cache; custom-home test uses synthetic credentials only.
 
 - [x] #44: explicit external answers use bounded durable handoff and retain the full returned text; UI accurately discloses bounded history; automatic quick-reply limits retained.
+
+- [x] #45: /model clears paid one-shot selection before catalog discovery; regression covers cancellation order.
