@@ -183,3 +183,5 @@ Deferred deliberately on 2026-08-01 — the critical read path is covered.
 - [x] #38: cancel/timeout/stop reap Codex process trees; intentional cancellation never replays to Claude. Real local subprocess regression tests added.
 
 - [x] #37: Telegram submits owned background tasks while feed/collect remain awaitable; FIFO, prompt responsiveness and shutdown cancellation tested.
+
+- [x] #39: Codex exports agent, route and state directory to MCP; RPC resolves exact session and rejects unknown/mismatched identities. Legacy known-agent callers remain supported.

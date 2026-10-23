@@ -39,12 +39,13 @@ import typing
 from pathlib import Path
 
 from . import bridgetools
+from .config import STATE_DIR
 
 log = logging.getLogger("bridge.toolrpc")
 
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("BRIDGE_TOOLRPC_PORT", "49620"))
-TOKEN_FILE = Path(os.environ.get("BRIDGE_STATE_DIR", "/home/ubuntu/alfred/state")) / "toolrpc.token"
+TOKEN_FILE = STATE_DIR / "toolrpc.token"
 _MAX_BODY = 1024 * 1024
 
 
@@ -101,21 +102,26 @@ class ToolRPC:
         if self._server:
             self._server.close()
 
-    async def _session_for(self, agent: str):
-        """Tools are bound to a session, so resolve one — creating it if the
-        engine asked before the agent had a turn."""
-        return await self.mgr.session_for_agent(agent if agent in self.mgr.agents
-                                                else self.mgr.active)
+    async def _session_for(self, agent: str, route: str = ""):
+        if route:
+            session = self.mgr.sessions.get(route)
+            if session is None or session.cfg.name != agent:
+                raise ValueError("unknown tool session or agent mismatch")
+            return session
+        # Legacy callers may name an existing agent, never the mutable active one.
+        if agent not in self.mgr.agents:
+            raise ValueError("unknown tool agent")
+        return await self.mgr.session_for_agent(agent)
 
-    async def _list(self, agent: str) -> dict:
-        s = await self._session_for(agent)
+    async def _list(self, agent: str, route: str = "") -> dict:
+        s = await self._session_for(agent, route)
         return {"tools": [{"name": t.name,
                            "description": t.description,
                            "inputSchema": _json_schema(t.input_schema)}
                           for t in bridgetools.build_tools(s)]}
 
-    async def _call(self, agent: str, name: str, args: dict) -> dict:
-        s = await self._session_for(agent)
+    async def _call(self, agent: str, name: str, args: dict, route: str = "") -> dict:
+        s = await self._session_for(agent, route)
         tools = {t.name: t for t in bridgetools.build_tools(s)}
         t = tools.get(name)
         if not t:
@@ -147,11 +153,12 @@ class ToolRPC:
                 return
             body = json.loads(await asyncio.wait_for(reader.readexactly(clen), timeout=10))
             agent = str(body.get("agent") or "")
+            route = str(body.get("route") or "")
             if path.endswith("/tools/list"):
-                await self._respond(writer, 200, await self._list(agent))
+                await self._respond(writer, 200, await self._list(agent, route))
             elif path.endswith("/tools/call"):
                 await self._respond(writer, 200, await self._call(
-                    agent, str(body.get("name") or ""), body.get("arguments") or {}))
+                    agent, str(body.get("name") or ""), body.get("arguments") or {}, route))
             else:
                 await self._respond(writer, 404, {"error": "unknown path"})
         except Exception as e:
