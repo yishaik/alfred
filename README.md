@@ -287,3 +287,13 @@ full `C:` can't break it.
 - The peer bus refuses to listen without a token, binds loopback by default
   (`BRIDGE_PEER_BIND`), and only accepts authenticated POSTs ≤64KB; still, keep
   it on a LAN/VPN, not the open internet.
+
+### Telegram actor authorization
+
+`BRIDGE_CHAT_ID` identifies the private-chat owner, who is allowed by default.
+When a forum group is enabled, group membership does not grant control.
+Set `BRIDGE_ALLOWED_USER_IDS` to a comma-separated list of additional trusted
+human user IDs if delegation is intended. This grants full bot control, not a
+read-only role. Anonymous/channel-authored updates and bot actors are rejected.
+The authorization gate runs before every update handler, including callbacks
+and reactions. Existing owner access is retained without configuration changes.
