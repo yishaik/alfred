@@ -639,13 +639,29 @@ class AgentSession:
         self.handoff.state["engine"] = self.engine
         self.handoff.save()
 
+        # A paid one-shot choice applies to the next user turn regardless of
+        # the durable native engine. Provider failure retains Claude fail-safe.
+        routed_first = source.kind == "user" and bool(self._external_pin)
+        if routed_first:
+            routed = text
+            try:
+                routed = await self._maybe_route(text)
+            except Exception as exc:
+                log.warning("explicit model routing failed; using Claude: %s", exc)
+            if routed is None:
+                self.busy = False
+                if self._capture is None:
+                    await self._drain()
+                return True
+            text = routed
+
         # --- alternative backend. Hangs off the same seam the model router
         # already uses: handled here and returned, so the Claude client is
         # never started and nothing downstream changes. Failure falls back to
         # Claude rather than losing the turn.
         eng_name = getattr(self, "engine", "claude")
         _ext = {"codex": codex_engine,
-                "antigravity": antigravity_engine}.get(eng_name)
+                "antigravity": antigravity_engine}.get(eng_name) if not routed_first else None
         if _ext:
             try:
                 if echo:
@@ -692,7 +708,7 @@ class AgentSession:
         # active and had just failed. That silently disabled the router for every
         # plain Claude session (the real "router doesn't work" bug). ANY error
         # here → log + fall through to the Claude session as today.
-        if source.kind == "user" and not _ext:
+        if source.kind == "user" and not _ext and not routed_first:
             routed = text
             try:
                 routed = await self._maybe_route(text)
@@ -700,7 +716,8 @@ class AgentSession:
                 log.warning("router hook failed, using Claude: %s", e)
             if routed is None:
                 self.busy = False
-                await self._drain()
+                if self._capture is None:
+                    await self._drain()
                 return True
             text = routed
         if echo:
@@ -797,7 +814,12 @@ class AgentSession:
         ans, provider_short = res
         cfg = router.load_config()
         body = f"🎈 {provider_short} · {ans}" if cfg.tag_replies else ans
-        self.outbox.emit(body)
+        if self._capture is not None:
+            future = self._capture["future"]
+            if not future.done():
+                future.set_result(ans)
+        else:
+            self.outbox.emit(body)
         self._react("👍")
         # Write this side-model exchange to the UNIFIED log (tagged with who
         # answered) and mark it as a turn Claude hasn't seen, so the next Claude
