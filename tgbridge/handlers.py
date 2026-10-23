@@ -1776,8 +1776,9 @@ _PRIV_CB = ("act:restart", "act:auto", "act:secretary", "model:", "xmodel:",
 
 def _admin_user(update: Update) -> bool:
     from .config import is_admin
-    u = update.effective_user
-    return bool(u) and is_admin(u.id)
+    # No user (fakes, channel posts) → is_admin(None): allowed only when no
+    # admin list is configured. The group=-1 authorize gate runs first anyway.
+    return is_admin(getattr(getattr(update, "effective_user", None), "id", None))
 
 
 def admin_only(fn):
