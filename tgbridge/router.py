@@ -199,6 +199,7 @@ class Decision:
     source: str = "heuristic"    # heuristic | llm | forced | failsafe
     text: str = ""               # possibly prefix-stripped text to actually use
     refine_skip: bool = False    # !raw override: skip prompt-refinement for this turn
+    model_id: str = ""          # explicit OpenRouter model, distinct from provider
     provider: str = ""           # pinned free-path provider name (external opt-in);
                                  #   set -> answer_free calls ONLY that provider
 
@@ -575,7 +576,15 @@ async def answer_free(text: str, session, decision: Decision) -> tuple[str, str]
         # calls ONLY that provider — never the auto chain. If it's not found the
         # loop stays empty and we fall through to Claude (never silent).
         pinned = getattr(decision, "provider", "") or ""
-        if pinned:
+        if decision.model_id:
+            # Dynamic IDs are opt-in only; never let model input select a URL/key.
+            if pinned != "openrouter" or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.:/-]+", decision.model_id):
+                return None
+            chain = [{"name": "dynamic:" + decision.model_id,
+                      "base_url": "https://openrouter.ai/api/v1",
+                      "env_key": "OPENROUTER_API_KEY", "model": decision.model_id,
+                      "rpm": 10, "rpd": 50, "max_chars": 24000, "manual": True}]
+        elif pinned:
             chain = [p for p in cfg.providers if p.get("name") == pinned]
         else:
             # Default auto walk: EXCLUDE manual/opt-in (paid) providers so an
