@@ -1211,8 +1211,9 @@ def _xmodel_picker_text() -> str:
 
 
 async def cmd_model(update: Update, ctx):
-    """Claude session-model picker (durable, subscription)."""
+    """Session-model picker; also cancels any pending paid one-shot pin."""
     s = await _session(update, ctx)
+    s._external_pin = ""
     from .model_catalog import refresh
     await refresh(s)
     await update.message.reply_text(
