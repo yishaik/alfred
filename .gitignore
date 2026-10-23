@@ -40,3 +40,8 @@ vault.json
 grants.json
 bootstrap-claims.jsonl
 .secret-migration/
+
+# Secret-ingest helper (holds credentials) and transient watchdog/selftest logs.
+.ingest-secrets.mjs
+watchdog.log
+.selftest-after-merge.log

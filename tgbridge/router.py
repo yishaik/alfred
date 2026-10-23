@@ -341,9 +341,9 @@ def _history_msgs(session, limit: int) -> list[dict]:
             u = pair[0] if len(pair) > 0 else ""
             a = pair[1] if len(pair) > 1 else ""
             if u:
-                out.append({"role": "user", "content": str(u)[:800]})
+                out.append({"role": "user", "content": str(u)[:1200]})
             if a:
-                out.append({"role": "assistant", "content": str(a)[:800]})
+                out.append({"role": "assistant", "content": str(a)[:1200]})
     except Exception as e:
         log.debug("history build failed: %s", e)
     return out
@@ -372,9 +372,20 @@ def _parse_classify_json(raw: str) -> dict | None:
         return None
 
 
+# Local-Ollama health gate: a dead Ollama otherwise costs `timeout_s` (≈4 s) on
+# EVERY classify call before falling through to Groq — the biggest hit to router
+# responsiveness. When a probe fails we skip Ollama for this long and go straight
+# to the hosted fallback; a later success clears the gate.
+_OLLAMA_URL = "http://127.0.0.1:11434/v1"
+_OLLAMA_COOLDOWN_S = 120.0
+_ollama_down_until: float = 0.0
+
+
 async def _llm_classify(text: str, session, cfg: RouterConfig) -> Decision:
-    """One strict-JSON classification call: Ollama gemma first, Groq 8b-instant
-    fallback, pure-heuristic (claude) failsafe. Never raises."""
+    """One strict-JSON classification call: Ollama gemma first (skipped while it
+    is known-down), Groq 8b-instant fallback, pure-heuristic (claude) failsafe.
+    Never raises."""
+    global _ollama_down_until
     clf = cfg.classifier
     timeout = float(clf.get("timeout_s", 4))
     msgs = [{"role": "system", "content": _CLASSIFY_SYS}]
@@ -383,17 +394,26 @@ async def _llm_classify(text: str, session, cfg: RouterConfig) -> Decision:
 
     attempts = []
     om = clf.get("ollama_model")
-    if om:
-        attempts.append(("http://127.0.0.1:11434/v1", "", om))
+    if om and time.monotonic() >= _ollama_down_until:
+        attempts.append((_OLLAMA_URL, "", om))
     gk = os.environ.get("GROQ_API_KEY", "")
     gm = clf.get("groq_model")
     if gk and gm:
         attempts.append(("https://api.groq.com/openai/v1", gk, gm))
+    # OpenRouter classifier fallback: the local Ollama floor is unreliable on a
+    # RAM/VRAM-starved host and Groq/Gemini keys can lapse, so a hosted free
+    # OpenRouter model keeps the router working as long as the OR key is valid.
+    ork = os.environ.get("OPENROUTER_API_KEY", "")
+    orm = clf.get("openrouter_model")
+    if ork and orm:
+        attempts.append(("https://openrouter.ai/api/v1", ork, orm))
 
     for base_url, key, model in attempts:
         try:
             data = await _chat(base_url, key, model, msgs, timeout=timeout,
-                               max_tokens=60, temperature=0.0)
+                               max_tokens=200, temperature=0.0)
+            if base_url == _OLLAMA_URL:
+                _ollama_down_until = 0.0        # probe succeeded — clear the gate
             parsed = _parse_classify_json(data or "")
             if parsed and parsed.get("route") in ("free", "claude"):
                 route = parsed["route"]
@@ -403,6 +423,8 @@ async def _llm_classify(text: str, session, cfg: RouterConfig) -> Decision:
                 tier = _TIER_MAP.get(str(parsed.get("tier", "")).lower(), "")
                 return Decision(route, tier, task, "llm classify", "llm", text)
         except Exception as e:   # network/parse error — logged, try next attempt
+            if base_url == _OLLAMA_URL:
+                _ollama_down_until = time.monotonic() + _OLLAMA_COOLDOWN_S
             log.debug("classify via %s failed: %s", base_url, e)
     return Decision("claude", "", "other", "classifier unavailable", "failsafe", text)
 
@@ -413,11 +435,17 @@ async def classify(text: str, session) -> Decision:
     try:
         cfg = load_config()
         agent = getattr(getattr(session, "cfg", None), "name", "main")
+        # Explicit user prefixes are an opt-in, not an automatic routing
+        # decision.  Honour them even when automatic routing is disabled, so
+        # !c / !f / !gpt (and !raw's prefix stripping) remain usable as the
+        # documented manual escape hatches.
+        h = _heuristic(text, session)
+        if h is not None and (h.source == "forced" or
+                              h.reason == "forced raw (no refine)"):
+            return h
         if _env_disabled() or cfg.agent_mode(agent) == "off":
             return Decision("claude", "", "other", "router off", "forced", text)
-        h = _heuristic(text, session)
         if h is not None:
-            # forced-free requested but... still honour it (user asked).
             return h
         d = await _llm_classify(text, session, cfg)
         return d

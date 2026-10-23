@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import time
 
 log = logging.getLogger("bridge.models")
 
@@ -90,3 +91,82 @@ async def refresh(session):
                            [("opus", "Opus (alias)"), ("sonnet", "Sonnet (alias)"),
                             ("haiku", "Haiku (alias)")])
     session.model_catalog = catalog
+
+
+_openrouter_cache: list[tuple[str, str]] = []
+_openrouter_cache_time: float = 0.0
+
+
+def openrouter_models(force_refresh: bool = False) -> list[tuple[str, str]]:
+    """Dynamically fetch the latest frontier models from OpenRouter API.
+    Groups by major frontier providers and extracts newest releases.
+    Cached for 5 minutes unless force_refresh is True."""
+    global _openrouter_cache, _openrouter_cache_time
+    now = time.monotonic()
+    if _openrouter_cache and not force_refresh and (now - _openrouter_cache_time < 300.0):
+        return _openrouter_cache
+
+    import urllib.request
+    req = urllib.request.Request(
+        "https://openrouter.ai/api/v1/models",
+        headers={"User-Agent": "telegram-claude-bridge/1.0"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=6.0) as r:
+            raw = json.loads(r.read()).get("data", [])
+    except Exception as e:
+        log.warning("OpenRouter dynamic model discovery failed: %s", e)
+        if _openrouter_cache:
+            return _openrouter_cache
+        return [
+            ("anthropic/claude-sonnet-5.5", "Claude Sonnet 5.5"),
+            ("anthropic/claude-opus-5.5", "Claude Opus 5.5"),
+            ("anthropic/claude-haiku-5.5", "Claude Haiku 5.5"),
+            ("openai/gpt-6.1-sol", "GPT-6.1 Sol"),
+            ("openai/gpt-6-luna", "GPT-6 Luna"),
+            ("google/gemini-4-argon", "Gemini 4 Argon"),
+            ("deepseek/deepseek-v4.1-flash", "DeepSeek V4.1 Flash"),
+            ("x-ai/grok-4.7", "Grok 4.7"),
+            ("mistralai/mistral-large-4-0", "Mistral Large 4"),
+        ]
+
+    notable_providers = {
+        "anthropic": "Anthropic",
+        "openai": "OpenAI",
+        "google": "Google",
+        "deepseek": "DeepSeek",
+        "x-ai": "xAI",
+        "mistralai": "Mistral",
+        "qwen": "Qwen",
+        "meta-llama": "Meta",
+    }
+    by_prov: dict[str, list] = {p: [] for p in notable_providers}
+    for m in raw:
+        mid = m.get("id", "")
+        if not mid or ":batch" in mid or ":nitro" in mid or mid.startswith("~"):
+            continue
+        # Enforce Telegram 64-byte callback limit with "xmodel:" prefix
+        if len(("xmodel:" + mid).encode("utf-8")) > 64:
+            continue
+        prov = mid.split("/")[0] if "/" in mid else ""
+        if prov in by_prov:
+            name = m.get("name", mid)
+            short_name = name.split(":")[-1].strip()
+            created = m.get("created", 0)
+            by_prov[prov].append((mid, short_name, created))
+
+    results = []
+    for p in notable_providers:
+        models = by_prov[p]
+        models.sort(key=lambda x: x[2], reverse=True)
+        for mid, short_name, _ in models[:3]:
+            label = short_name
+            if len(label) > 26:
+                label = label[:24] + "…"
+            results.append((mid, label))
+
+    if results:
+        _openrouter_cache = results
+        _openrouter_cache_time = now
+    return _openrouter_cache
+

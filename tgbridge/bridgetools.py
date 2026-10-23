@@ -39,10 +39,18 @@ SERVER_NAME = "bridge"
 # Derived from the tools themselves, not typed out again. Keeping a parallel
 # list by hand meant adding a tool took an edit in three places, and forgetting
 # one of them produced a tool that existed but was never permitted — a failure
-# that looks like the model refusing to use it. build_tools() fills this in on
-# first call; the module-level default keeps import-time consumers working.
-TOOL_NAMES: list[str] = []
-ALLOWED: list[str] = []
+# that looks like the model refusing to use it.  Keep the import-time fallback
+# in sync with build_tools(): some launchers inspect the permitted MCP names
+# before a session (and therefore its tool objects) exists.  build_tools()
+# still replaces both lists from the actual tool objects at runtime.
+TOOL_NAMES: list[str] = [
+    "send_file", "send_buttons", "message_agent",
+    "schedule", "unschedule", "list_jobs",
+    "remember", "forget", "recall", "kb_read",
+    "fetch_content", "brain_search", "brain_read",
+    "ingest_second_brain", "publish_second_brain_site", "route_model",
+]
+ALLOWED: list[str] = [f"mcp__{SERVER_NAME}__{name}" for name in TOOL_NAMES]
 
 
 def _refresh_names(tools) -> None:

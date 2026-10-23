@@ -193,16 +193,38 @@ def model_kb(s) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def xmodels_kb() -> InlineKeyboardMarkup:
-    """External (paid, opt-in via OpenRouter) models picker. Tapping one PINS the
-    NEXT user message to that provider (one-shot) — it is NOT the durable session
-    model (Claude models are). Callback data: xmodel:<provider>."""
-    def x(name, prov):
-        return InlineKeyboardButton(name, callback_data=f"xmodel:{prov}")
-    return InlineKeyboardMarkup([
-        [x("GPT-5.5", "gpt-5.5"), x("GPT-5.4", "gpt-5.4"), x("GLM-5.2", "glm-5.2")],
-        [InlineKeyboardButton("⬅ מודלים", callback_data="menu:model")],
+def xmodels_kb(page: int = 0) -> InlineKeyboardMarkup:
+    """Dynamic external (OpenRouter) models picker with pagination and refresh.
+    Tapping one PINS the NEXT user message to that provider (one-shot)."""
+    from .model_catalog import openrouter_models
+    all_models = openrouter_models()
+    page_size = 6
+    total_pages = max(1, (len(all_models) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * page_size
+    current_page_models = all_models[start:start + page_size]
+
+    def x(mid, label):
+        return InlineKeyboardButton(label, callback_data=f"xmodel:{mid}")
+
+    buttons = [x(mid, label) for mid, label in current_page_models]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀", callback_data=f"xpage:{page - 1}"))
+    nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data=f"xpage:{page}"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("▶", callback_data=f"xpage:{page + 1}"))
+    if len(nav) > 1:
+        rows.append(nav)
+
+    rows.append([
+        InlineKeyboardButton("↻ רענן", callback_data="xmodel_refresh"),
+        InlineKeyboardButton("⬅ מודלים", callback_data="menu:model"),
     ])
+    return InlineKeyboardMarkup(rows)
 
 
 def router_kb(cfg) -> InlineKeyboardMarkup:
@@ -1125,11 +1147,11 @@ def _model_picker_text(s) -> str:
 
 
 def _xmodel_picker_text() -> str:
-    """Header for the external (paid) one-shot model picker (/models)."""
+    """Header for the dynamic external model picker (/models)."""
     return (
-        "🌐 מודלים חיצוניים (OpenRouter — בתשלום לפי טוקן, מכסה יומית).\n"
-        "בחירה כאן עונה על ההודעה הבאה בלבד (פעם אחת), לא משנה את מודל השיחה.\n"
-        "קיצורים בצ'אט: !gpt / !gpt54 / !glm.")
+        "🌐 מודלים חיצוניים (OpenRouter — נטענים דינאמית בלייב):\n"
+        "בחירה במודל מצמידה אותו לתור הבא עם כל יומן השיחה המשותף.\n"
+        "קיצורים בצ'אט: !or <model> <שאלה>, !gpt, !deepseek, !grok, !gemini.")
 
 
 async def cmd_model(update: Update, ctx):
@@ -1725,7 +1747,17 @@ async def on_callback(update: Update, ctx):
         await refresh(s)
         await _edit(q, _model_picker_text(s), model_kb(s))
     elif data == "menu:xmodel":
-        await _edit(q, _xmodel_picker_text(), xmodels_kb())
+        await _edit(q, _xmodel_picker_text(), xmodels_kb(0))
+    elif data.startswith("xpage:"):
+        try:
+            p = int(data.split(":", 1)[1])
+        except ValueError:
+            p = 0
+        await _edit(q, _xmodel_picker_text(), xmodels_kb(p))
+    elif data == "xmodel_refresh":
+        from .model_catalog import openrouter_models
+        openrouter_models(force_refresh=True)
+        await _edit(q, _xmodel_picker_text(), xmodels_kb(0))
     elif data == "menu:router":
         text, kb = await _router_card()
         await _edit(q, text[:4000], kb)
@@ -1747,15 +1779,13 @@ async def on_callback(update: Update, ctx):
         await _apply_model_choice(q, s, m, prefix, mid)
     elif data.startswith("xmodel:"):
         prov = data.split(":", 1)[1]
-        # one-shot pin: the NEXT user message is answered by this external
-        # (paid, opt-in) provider, then the pin clears. Not the session model.
         s._external_pin = prov
-        pretty = {"gpt-5.5": "GPT-5.5", "gpt-5.4": "GPT-5.4",
-                  "glm-5.2": "GLM-5.2"}.get(prov, prov)
+        short = prov.split("/")[-1]
         await _edit(
             q,
-            f"🌐 ההודעה הבאה תיענה ע\"י {pretty} (חיצוני, OpenRouter — בתשלום, "
-            f"פעם אחת). לביטול: שלח /model או תבחר Default.",
+            f"🌐 ההודעה הבאה תיענה ע\"י {short} (OpenRouter דינאמי).\n"
+            f"כל יומן השיחה המשותף יועבר אליו ברציפות.\n"
+            f"לביטול: שלח /model.",
             panel_kb(s))
     elif data.startswith("voi:"):
         v = data.split(":", 1)[1]

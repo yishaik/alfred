@@ -18,6 +18,36 @@ try { New-Item -ItemType File -Path (Join-Path $root 'state\.restart-pending') -
 Start-Sleep -Seconds 12          # let the triggering reply flush to Telegram first
 L ('=== restart begin' + $(if ($Tidy) { ' (tidy)' } else { '' }) + ' ===')
 
+# 0. Hand the kill off to the watchdog when we are running inside the very tree
+# we are about to kill - which is the normal case, because Alfred triggers this
+# from a bridge session. Step 1 below kills bridge.py, that takes down the Claude
+# CLI child, and this script dies with it *before* reaching the relaunch in step
+# 3. That is exactly how the bridge stayed down for 21h on 2026-08-12. The
+# watchdog task runs from the Task Scheduler service, outside our tree, so it
+# survives the kill and both restarts and relaunches within ~1 min.
+$inTree = $false
+try {
+  $me = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId
+  for ($i = 0; $i -lt 12 -and $me; $i++) {
+    $p = Get-CimInstance Win32_Process -Filter "ProcessId=$me"
+    if (-not $p) { break }
+    if ($p.CommandLine -match 'supervisor\.py|bridge\.py|claude\.exe') { $inTree = $true; break }
+    $me = $p.ParentProcessId
+  }
+} catch {}
+
+$watchdog = Get-ScheduledTask -TaskName 'ClaudeBridgeWatchdog' -ErrorAction SilentlyContinue
+if ($inTree -and $watchdog) {
+  L 'running inside the bridge tree - delegating kill+relaunch to ClaudeBridgeWatchdog'
+  New-Item -ItemType File -Path (Join-Path $root 'state\.restart-requested') -Force | Out-Null
+  Start-ScheduledTask -TaskName 'ClaudeBridgeWatchdog'
+  L '=== restart delegated ==='
+  return
+}
+if ($inTree) {
+  L 'WARNING: inside the bridge tree and no watchdog task installed - the relaunch in step 3 will probably not be reached. Run install_watchdog.ps1.'
+}
+
 # 1. kill every python supervisor/bridge process (both .venv and uv copies)
 Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
   Where-Object { $_.CommandLine -match 'supervisor\.py|bridge\.py' } |

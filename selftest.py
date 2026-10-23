@@ -825,7 +825,7 @@ async def test_peer_protocol():
     received = []
 
     class FakeMgr:
-        async def on_peer_message(self, peer, agent, text, hop):
+        async def on_peer_message(self, peer, agent, text, hop, verified=False):
             received.append((peer, agent, text, hop))
 
     peers_mod.PEER_TOKEN = "s3cret"
