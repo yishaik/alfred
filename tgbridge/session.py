@@ -34,7 +34,8 @@ from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
                       ReactionTypeEmoji)
 from telegram.constants import ChatAction
 
-from . import bridgetools, codex_engine, guards, markers, router, voice
+from . import (antigravity_engine, bridgetools, codex_engine, guards, markers,
+               router, voice)
 import os
 import re
 
@@ -49,6 +50,7 @@ from .mood import Mood
 from .outbox import Outbox
 from .soul import Soul
 from .ratelimit import Backoff, TokenBucket
+from .handoff import Conversation
 
 FILE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 
@@ -279,7 +281,8 @@ class AgentSession:
         self.proactive_armed = True
         # Which backend answers this agent's turns. Per-session so one
         # agent can be on Codex while the others stay on Claude.
-        self.engine = os.environ.get("BRIDGE_ENGINE", "claude").strip().lower()
+        self.handoff = Conversation(skey)
+        self.engine = self.handoff.state.get("engine") or os.environ.get("BRIDGE_ENGINE", "claude").strip().lower()
         self._proactive_silent = False
         # undo / context / tasks / telegram-native state
         self.turn_user_uuid: str | None = None
@@ -293,12 +296,21 @@ class AgentSession:
         self._streaming_tools: list[str] = []
         self._turn_had_tools = False
         self._shell_calls: dict[str, bool] = {}   # tool_use_id -> shell? (Bash/PS)
-        # model router (free-model side channel): rolling (user, assistant≤300)
-        # pairs feed the free model + classifier real context; _turn_model is a
-        # per-turn tier pick for full mode (agents on auto) applied in _send_turn.
-        # free_notes is retained (unused) — the [FYI] handoff to Claude was
-        # dropped as noise; the deque above is the only side-model context kept.
-        self.free_history: deque = deque(maxlen=8)
+        # Unified conversation log: ONE rolling transcript every model writes to
+        # (Claude turns AND free/external answers), so switching models stays
+        # continuous instead of each running on a separate memory. Each entry is
+        # a 3-tuple (user_text, assistant_text, who) where `who` is the short
+        # provider/model name ("claude", "gemini", "gpt-5.5", …). Kept at higher
+        # fidelity than the old 300-char/8-pair side channel. Readers index [0]/
+        # [1] so the 3rd element is additive and back-compatible.
+        self.free_history: deque = deque(
+            ((r["user"], r["answer"], r["engine"]) for r in self.handoff.rows), maxlen=16)
+        # Turns answered by a NON-Claude model since Claude last spoke. At the
+        # start of the next Claude turn these are injected as a compact catch-up
+        # block so Claude stays in sync with what the side models said (the
+        # free→Claude direction that used to be disabled — re-enabled cleanly,
+        # only for turns Claude genuinely missed).
+        self._pending_for_claude: list = []
         self.free_notes: list = []
         self._turn_model: str = ""
         self._last_applied_model: str = ""
@@ -310,6 +322,7 @@ class AgentSession:
         # message is answered by this external (paid, opt-in) provider, then the
         # pin clears. "" = no pin. Explicit prefixes (!gpt/!glm) bypass this.
         self._external_pin: str = ""
+        self._input_tasks: set[asyncio.Task] = set()
 
     def _prefix(self) -> str:
         # label output whenever "who is talking" isn't obvious: any group/topic
@@ -359,8 +372,12 @@ class AgentSession:
                            "append": prompt},
             can_use_tool=self._can_use_tool,
             include_partial_messages=True,
-            permission_mode="bypassPermissions" if self.cfg.auto_approve else None,
-            allowed_tools=list(SAFE_TOOLS) + list(bridgetools.ALLOWED),
+            permission_mode="bypassPermissions" if self.cfg.auto_approve and not self.cfg.read_only else None,
+            allowed_tools=(list(READ_ONLY_TOOLS) + [f"mcp__bridge__{name}" for name in bridgetools.READ_ONLY]
+                           if self.cfg.read_only else list(SAFE_TOOLS) + list(bridgetools.ALLOWED)),
+            disallowed_tools=(["Bash", "Write", "Edit", "NotebookEdit", "Task", "Agent"] +
+                              [name for name in bridgetools.ALLOWED if name.rsplit("__", 1)[-1] not in bridgetools.READ_ONLY]
+                              if self.cfg.read_only else []),
             mcp_servers={bridgetools.SERVER_NAME: bridge_server},
             hooks=guards.build_hooks(self),
             enable_file_checkpointing=True,
@@ -556,6 +573,9 @@ class AgentSession:
 
     async def _stop_locked(self):
         self._stopping = True
+        await codex_engine.interrupt(self.skey)
+        await self._cancel_tasks(*self._input_tasks)
+        self._input_tasks.clear()
         self.connected = False
         if self.busy and self.turn_source.kind == "user" and self._turn_input_text:
             cut = self._turn_input_text.replace("\n", " ")[:80]
@@ -618,6 +638,9 @@ class AgentSession:
         await self._drain()
 
     async def interrupt(self):
+        if await codex_engine.interrupt(self.skey):
+            self.outbox.emit("⏹ Codex stopped")
+            return
         if self.client and self.busy:
             try:
                 await self.client.interrupt()
@@ -628,6 +651,38 @@ class AgentSession:
         await self.restart(resume=True, note="")
 
     # -- input ----------------------------------------------------------------#
+    async def submit(self, text: str, source: TurnSource | None = None,
+                     echo: bool = False) -> bool:
+        """Admit Telegram input without holding PTB's sequential update loop.
+
+        feed() remains awaitable for scheduler and internal collect callers.
+        Tasks belong to this session and are cancelled on stop/restart.
+        """
+        if self.busy:
+            return await self.feed(text, source, echo)
+        task = asyncio.create_task(self.feed(text, source, echo))
+        self._input_tasks.add(task)
+
+        def finished(done):
+            self._input_tasks.discard(done)
+            if done.cancelled():
+                self.busy = False
+                self._fail_capture("turn cancelled")
+                if not self._stopping and self.pending:
+                    drain = asyncio.create_task(self._drain())
+                    self._input_tasks.add(drain)
+                    drain.add_done_callback(finished)
+            elif done.exception():
+                log.error("input task failed for %s", self.skey,
+                          exc_info=done.exception())
+                self.busy = False
+                self._fail_capture("input task failed")
+                self.outbox.emit("⚠️ Turn failed; please retry.")
+        task.add_done_callback(finished)
+        # Let feed reserve busy before a second update can be admitted.
+        await asyncio.sleep(0)
+        return True
+
     async def feed(self, text: str, source: TurnSource | None = None,
                    echo: bool = False) -> bool:
         source = source or TurnSource()
@@ -636,52 +691,11 @@ class AgentSession:
             self.last_activity = time.monotonic()
             self.proactive_armed = True
 
-        # --- alternative backend. Hangs off the same seam the model router
-        # already uses: handled here and returned, so the Claude client is
-        # never started and nothing downstream changes. Failure falls back to
-        # Claude rather than losing the turn.
-        if getattr(self, "engine", "claude") == "codex":
-            try:
-                if echo:
-                    self.outbox.emit(f"▶️ {text}")
-                self.outbox.start()
-                reply, usage = await codex_engine.run_turn(
-                    self.cfg.name, text, self.cfg.workdir)
-                self.outbox.emit(reply)
-                log.info("codex turn for %s: %s in / %s out", self.cfg.name,
-                         usage.get("input_tokens"), usage.get("output_tokens"))
-                self.outbox.stop()
-                return True
-            except Exception as e:
-                log.warning("codex turn failed, falling back to Claude: %s", e)
-                if codex_engine.is_usage_exhausted(e):
-                    self.engine = "claude"
-                    self.outbox.emit("🔀 Codex usage is exhausted — switching "
-                                     "automatically to Claude")
-                else:
-                    self.outbox.emit(f"⚠️ codex failed ({e}) — this turn goes to Claude")
-            # --- model router (fail-safe): scheduler/peer/bot turns never routed.
-            # ANY error here → log + fall through to the Claude session as today.
-            try:
-                text = await self._maybe_route(text)
-                if text is None:
-                    return True          # free model answered; Claude untouched
-            except Exception as e:
-                log.warning("router hook failed, using Claude: %s", e)
-        if source.kind != "user" and not self.bot_turn_bucket.allow():
-            self.outbox.emit(
-                f"🚦 dropped {source.kind} turn (rate limit "
-                f"{BOT_TURNS_PER_HOUR}/h reached): {text[:120]}")
-            return False
-        if echo:
-            self.outbox.emit(f"▶️ {text}")
+        # Queue BEFORE calling any provider. External engines and the router
+        # must obey the same single-turn rule as the SDK consumer.
         if self.busy:
-            # deque(maxlen) silently evicts the OLDEST item — the opposite of this
-            # module's contract ("never silently dropped"). Refuse loudly instead.
             if len(self.pending) >= self.pending.maxlen:
-                self.outbox.emit(
-                    f"🚦 התור מלא ({self.pending.maxlen}) — ההודעה הזו לא נקלטה. "
-                    "השתמש/י ב-/interrupt או המתן/י לסיום.")
+                self.outbox.emit("🚦 התור מלא — ההודעה לא נקלטה. נסה שוב בסיום התשובה.")
                 return False
             self.pending.append((text, source))
             self.persist_pending()
@@ -693,8 +707,140 @@ class AgentSession:
                     f"⏳ queued (#{len(self.pending)} in line) — "
                     "/interrupt to cut in", kb)
             return True
+        if source.kind != "user" and not self.bot_turn_bucket.allow():
+            self.outbox.emit(f"🚦 dropped {source.kind} turn (rate limit)")
+            return False
+        self.busy = True
+        self.turn_started = time.monotonic()
+        self.turn_source = source
+        self.handoff.state["engine"] = self.engine
+        self.handoff.save()
+
+        # A paid one-shot choice applies to the next user turn regardless of
+        # the durable native engine. Provider failure retains Claude fail-safe.
+        routed_first = source.kind == "user" and bool(self._external_pin)
+        if routed_first:
+            routed = text
+            try:
+                routed = await self._maybe_route(text)
+            except Exception as exc:
+                log.warning("explicit model routing failed; using Claude: %s", exc)
+            if routed is None:
+                self.busy = False
+                if self._capture is None:
+                    await self._drain()
+                return True
+            text = routed
+
+        # --- alternative backend. Hangs off the same seam the model router
+        # already uses: handled here and returned, so the Claude client is
+        # never started and nothing downstream changes. Failure falls back to
+        # Claude rather than losing the turn.
+        eng_name = getattr(self, "engine", "claude")
+        if self.cfg.read_only and eng_name != "claude":
+            # Native alternate engines do not yet enforce this role's policy.
+            eng_name = self.engine = "claude"
+            self.handoff.state["engine"] = "claude"
+            self.handoff.save()
+        _ext = {"codex": codex_engine,
+                "antigravity": antigravity_engine}.get(eng_name) if not routed_first else None
+        if _ext:
+            try:
+                if echo:
+                    self.outbox.emit(f"▶️ {text}")
+                self.outbox.start()
+                reply, usage = await _ext.run_turn(
+                    self.skey, self._handoff_prompt(eng_name, text,
+                        fresh=not _ext.thread_for(self.skey)), self.cfg.workdir)
+            except asyncio.CancelledError:
+                self.busy = False
+                self._fail_capture("turn cancelled")
+                raise
+            except Exception as e:
+                log.warning("%s turn failed, falling back to Claude: %s",
+                            eng_name, e)
+                if _ext.is_usage_exhausted(e):
+                    self.engine = "claude"
+                    self.handoff.state["engine"] = self.engine
+                    self.handoff.save()
+                    self.outbox.emit(f"🔀 {eng_name} usage is exhausted — "
+                                     "switching automatically to Claude")
+                else:
+                    self.outbox.emit(f"⚠️ {eng_name} failed ({e}) — this turn "
+                                     "goes to Claude")
+            else:
+                self._record_exchange(eng_name, text, reply)
+                captured = self._capture is not None
+                if self._capture is not None:
+                    fut = self._capture["future"]
+                    if not fut.done():
+                        fut.set_result(reply)
+                else:
+                    self.outbox.emit(reply)
+                log.info("%s turn for %s: %s in / %s out", eng_name,
+                         self.cfg.name, usage.get("input_tokens"), usage.get("output_tokens"))
+                self.busy = False
+                if not captured:
+                    await self._drain()
+                return True
+        # --- model router (fail-safe): ONLY user turns are routed; scheduler/
+        # peer/bot turns always go straight to Claude. This runs for the normal
+        # Claude engine too — previously the block was nested inside `if _ext:`,
+        # so it only ever ran when an alternative engine (codex/antigravity) was
+        # active and had just failed. That silently disabled the router for every
+        # plain Claude session (the real "router doesn't work" bug). ANY error
+        # here → log + fall through to the Claude session as today.
+        if source.kind == "user" and not _ext and not routed_first:
+            routed = text
+            try:
+                routed = await self._maybe_route(text)
+            except Exception as e:
+                log.warning("router hook failed, using Claude: %s", e)
+            if routed is None:
+                self.busy = False
+                if self._capture is None:
+                    await self._drain()
+                return True
+            text = routed
+        if echo:
+            self.outbox.emit(f"▶️ {text}")
         await self._send_turn(text, source)
         return True
+
+    def _handoff_prompt(self, engine: str, text: str, *, fresh: bool = False) -> str:
+        self.handoff.seed_claude(self.cfg.workdir, self.session_id)
+        if engine == "claude" and self.handoff.state.get("claude_session") == self.session_id:
+            fresh = False
+        return self.handoff.prompt(engine, text, fresh=fresh)
+
+    def _record_exchange(self, engine: str, text: str, reply: str):
+        self.handoff.record(engine, text, reply)
+        self.free_history.append((text, reply, engine))
+        if engine == "claude":
+            self.handoff.state["claude_session"] = self.session_id
+            self._pending_for_claude = []
+        self.handoff.save()
+
+    @staticmethod
+    def _render_catchup(pending: list) -> str:
+        """Compact, clearly-tagged block of the side/external-model turns Claude
+        missed, so it can continue the conversation in sync. Bounded so it never
+        bloats the turn. Pure — returns '' when there is nothing to inject."""
+        if not pending:
+            return ""
+        lines = ["[context — while you were away, these turns were answered by "
+                 "another model; continue in sync with them]"]
+        budget = 3000
+        used = 0
+        for q, a, who in pending[-6:]:
+            q1 = (q or "").strip()
+            a1 = (a or "").strip()
+            chunk = f"\nUser: {q1}\n{who}: {a1}"
+            if used + len(chunk) > budget:
+                break
+            lines.append(chunk)
+            used += len(chunk)
+        return "\n".join(lines)
 
     async def _maybe_route(self, text: str) -> str | None:
         """Pre-prompt model router. Returns the (possibly prefix-stripped) text
@@ -713,7 +859,9 @@ class AgentSession:
         if pin and not text.lstrip().startswith(("!", "/")):
             decision = router.Decision(
                 route="free", task="other", source="forced",
-                reason=f"picker-pinned {pin}", text=text, provider=pin)
+                reason=f"picker-pinned {pin}", text=text,
+                provider="openrouter" if "/" in pin else pin,
+                model_id=pin if "/" in pin else "")
         else:
             decision = await router.classify(text, self)
         # remember a per-turn tier pick for full mode (auto agents only)
@@ -754,13 +902,21 @@ class AgentSession:
         ans, provider_short = res
         cfg = router.load_config()
         body = f"🎈 {provider_short} · {ans}" if cfg.tag_replies else ans
-        self.outbox.emit(body)
+        if self._capture is not None:
+            future = self._capture["future"]
+            if not future.done():
+                future.set_result(ans)
+        else:
+            self.outbox.emit(body)
         self._react("👍")
-        # keep the free model's own context (classifier + free-model history);
-        # the free_notes handoff to Claude is intentionally dropped (noise).
-        q = (decision.text or "")[:300]
-        a = (ans or "")[:300]
-        self.free_history.append((q, a))
+        # Write this side-model exchange to the UNIFIED log (tagged with who
+        # answered) and mark it as a turn Claude hasn't seen, so the next Claude
+        # turn can catch up on it.
+        q = (decision.text or "")[:1200]
+        a = (ans or "")[:1200]
+        self.free_history.append((q, a, provider_short))
+        self._pending_for_claude.append((q, a, provider_short))
+        self.handoff.record(provider_short, decision.text or "", ans or "")
         return None
 
     async def _failover_to_codex(self) -> bool:
@@ -771,6 +927,8 @@ class AgentSession:
         the live session engine so later turns do not repeatedly hit Claude's
         exhausted allowance.
         """
+        if self.cfg.read_only:
+            return False
         prompt = self._turn_input_text
         ok, why = codex_engine.available()
         if not prompt or not ok:
@@ -778,12 +936,15 @@ class AgentSession:
             return False
         try:
             reply, usage = await codex_engine.run_turn(
-                self.cfg.name, prompt, self.cfg.workdir)
+                self.skey, self._handoff_prompt("codex", prompt,
+                    fresh=not codex_engine.thread_for(self.skey)), self.cfg.workdir)
         except Exception as e:
             log.warning("Claude usage exhausted; Codex failover failed: %s", e)
             return False
 
         self.engine = "codex"
+        self.handoff.state["engine"] = self.engine
+        self._record_exchange("codex", prompt, reply)
         log.info("automatic Claude -> Codex failover for %s: %s in / %s out",
                  self.cfg.name, usage.get("input_tokens"),
                  usage.get("output_tokens"))
@@ -811,14 +972,17 @@ class AgentSession:
             raise TimeoutError("worker stayed busy")
         loop = asyncio.get_running_loop()
         self._capture = {"texts": [], "future": loop.create_future()}
+        future = self._capture["future"]
         was_muted = self.outbox.muted
         self.outbox.muted = True          # this turn's output stays internal
         try:
             await self.feed(text)
-            return await asyncio.wait_for(self._capture["future"], timeout)
+            return await asyncio.wait_for(future, timeout)
         finally:
             self.outbox.muted = was_muted
             self._capture = None
+            if not self.busy:
+                await self._drain()
 
     async def _send_turn(self, text: str, source: TurnSource):
         if not self.connected:
@@ -866,9 +1030,12 @@ class AgentSession:
         # (pop_nudge returns "" if unchanged) so we never spam the turn stream.
         nudge = self.mood.pop_nudge()
         sent = f"[mood — {nudge}]\n{text}" if nudge else text
-        # free-context handoff DISABLED: the [FYI — side-model exchanges] block
-        # was noise. We keep free_history in-memory (classifier context only) but
-        # no longer prepend the side-model Q/A to Claude's turn.
+        # Catch-up handoff: if a side/external model answered turns since Claude
+        # last spoke, prepend a compact, clearly-tagged block so Claude stays in
+        # sync with the conversation (unified history). Only genuinely-missed
+        # turns are injected, then cleared — so it is not the old noisy FYI dump.
+        sent = self._handoff_prompt("claude", sent,
+            fresh=self.handoff.state.get("claude_session") != self.session_id)
         self._react("👀")          # acknowledge: working on it
         try:
             await self.client.query(sent)
@@ -891,7 +1058,7 @@ class AgentSession:
         if self.pending and not self.busy:
             text, source = self.pending.popleft()
             self.persist_pending()
-            await self._send_turn(text, source)
+            await self.feed(text, source)
 
     # -- output ---------------------------------------------------------------#
     async def _consume(self):
@@ -1101,33 +1268,43 @@ class AgentSession:
             return
 
         if isinstance(msg, ResultMessage):
-            self.busy = False
+            self.busy = True
             self.backoff.reset()
             exhausted = (msg.is_error and (
                 self._claude_limit_status == "rejected"
                 or codex_engine.is_usage_exhausted(msg.result)
                 or codex_engine.is_usage_exhausted(msg.subtype)))
-            if exhausted and await self._failover_to_codex():
+            switched = False
+            if exhausted:
+                switched = await self._failover_to_codex()
+            if switched:
                 self.mgr.add_cost(msg.total_cost_usd or 0.0)
                 self._turn_user_text = ""
                 self._turn_final_text = ""
                 self._turn_input_text = ""
+                self.busy = False
                 await self._drain()
                 return
             self.mood.note_result(bool(msg.is_error))   # update emotional weather
+            if not msg.is_error and self._turn_input_text and self._turn_final_text:
+                self._record_exchange("claude", self._turn_input_text, self._turn_final_text)
+            self._turn_user_text = ""
+            self._turn_final_text = ""
             # capture mode (branch/merge): hand the gathered text to collect()
             if self._capture is not None:
                 self.mgr.add_cost(msg.total_cost_usd or 0.0)
                 fut = self._capture["future"]
                 if not fut.done():
                     fut.set_result("\n".join(self._capture["texts"]).strip())
-                await self._drain()
+                self.busy = False
+                # collect() restores mute/capture state before draining.
                 return
             # a proactive check-in that chose silence leaves no footer either —
             # the whole turn stays invisible. Still account for its cost.
             if self._proactive_silent:
                 self._proactive_silent = False
                 self.mgr.add_cost(msg.total_cost_usd or 0.0)
+                self.busy = False
                 await self._drain()
                 return
             self._react("😱" if msg.is_error else "👍")   # done
@@ -1184,15 +1361,10 @@ class AgentSession:
                 self.outbox.keyboard(foot, InlineKeyboardMarkup([buttons]))
             else:
                 self.outbox.emit(foot)
-            # router: give the free model real context — append this Claude turn's
-            # (user, final-reply≤300) to the rolling history.
-            if self._turn_user_text and self._turn_final_text:
-                self.free_history.append((self._turn_user_text[:300],
-                                          self._turn_final_text[:300]))
-                self._turn_user_text = ""
-                self._turn_final_text = ""
+            self.busy = False
             await self._drain()
             return
+
 
         if isinstance(msg, RateLimitEvent):
             info = msg.rate_limit_info
@@ -1206,10 +1378,12 @@ class AgentSession:
                 # When no turn is in flight there is nothing to replay. Move the
                 # next turn immediately; an in-flight rejected turn is replayed
                 # when its ResultMessage arrives, avoiding duplicate answers.
-                if info.status == "rejected" and not self.busy:
+                if info.status == "rejected" and not self.busy and not self.cfg.read_only:
                     ok, _ = codex_engine.available()
                     if ok and self.engine != "codex":
                         self.engine = "codex"
+                        self.handoff.state["engine"] = self.engine
+                        self.handoff.save()
                         self.outbox.emit("🔀 Claude usage is exhausted — next "
                                          "turn will use Codex automatically")
             return
@@ -1284,10 +1458,13 @@ class AgentSession:
 
     # -- permissions / questions ----------------------------------------------#
     async def _can_use_tool(self, tool_name: str, tool_input: dict, ctx):
-        if self.cfg.read_only and tool_name not in READ_ONLY_TOOLS:
+        bridge_read = tool_name in {f"mcp__bridge__{name}" for name in bridgetools.READ_ONLY}
+        if self.cfg.read_only and tool_name not in READ_ONLY_TOOLS and not bridge_read:
             return PermissionResultDeny(
                 message="[bridge] this orchestration role is read-only; inspect "
                         "and report without changing files or external state")
+        if bridge_read:
+            return PermissionResultAllow()
         # AskUserQuestion: handle here ONLY in approvals mode. In bypass mode the
         # AssistantMessage handler renders it via _legacy_question; handling it
         # here too delivered the question/answer twice (the duplicate-question bug).

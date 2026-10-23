@@ -40,7 +40,10 @@ import json
 import logging
 import os
 import shutil
+import signal
 from pathlib import Path
+
+from .config import STATE_DIR, load_json, save_json
 
 log = logging.getLogger("bridge.codex")
 
@@ -49,7 +52,64 @@ CODEX_BIN = os.environ.get("BRIDGE_CODEX_BIN", "") or shutil.which("codex") or \
 
 # One thread id per agent, so /engine codex resumes where it left off rather
 # than starting fresh on every message.
-_threads: dict[str, str] = {}
+_STATE_FILE = STATE_DIR / "codex-threads.json"
+_saved = load_json(_STATE_FILE, {})
+_threads: dict[str, str] = _saved.get("threads", {})
+# Optional per-agent model override (else codex uses its configured default).
+_models: dict[str, str] = _saved.get("models", {})
+
+
+def _persist():
+    try:
+        save_json(_STATE_FILE, {"threads": _threads, "models": _models})
+    except OSError:
+        log.exception("could not persist Codex thread state")
+
+
+def codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME") or str(Path.home() / ".codex")).expanduser()
+
+
+def default_model() -> str | None:
+    import tomllib
+    home = codex_home()
+    try:
+        return tomllib.loads((home / "config.toml").read_text(encoding="utf-8")).get("model")
+    except (OSError, ValueError):
+        return None
+
+
+def get_model(agent: str) -> str | None:
+    return _models.get(agent)
+
+
+def set_model(agent: str, model: str | None) -> None:
+    if model:
+        _models[agent] = model
+    else:
+        _models.pop(agent, None)
+    # exec resume supports -m: keep the thread and all native tool context.
+    _persist()
+
+
+def list_models() -> list[tuple[str, str]]:
+    """Selectable codex models from ~/.codex/models_cache.json (internal
+    slugs like gpt-reserve / codex-auto-review filtered out)."""
+    try:
+        data = json.loads((codex_home() / "models_cache.json").read_text(encoding="utf-8"))
+        arr = data if isinstance(data, list) else (data.get("models") or data.get("data") or [])
+        out, seen = [], set()
+        for m in arr:
+            mid = m if isinstance(m, str) else (m.get("id") or m.get("slug") or m.get("name"))
+            if isinstance(m, dict) and (m.get("hidden") or m.get("visibility") == "hide"):
+                continue
+            if mid and mid not in seen and not any(x in mid for x in ("reserve", "auto-review")):
+                label = mid if isinstance(m, str) else m.get("display_name") or m.get("displayName") or mid
+                out.append((mid, label))
+                seen.add(mid)
+        return out
+    except Exception:
+        return []
 
 # Keep this deliberately narrower than a generic "limit" search: context-window,
 # tool-output and file-size limits are turn-specific and must not move the whole
@@ -74,15 +134,15 @@ def available() -> tuple[bool, str]:
     reported at the moment of the decision rather than on the next message."""
     if not Path(CODEX_BIN).exists():
         return False, f"codex CLI not found at {CODEX_BIN}"
-    auth = Path.home() / ".codex/auth.json"
+    auth = codex_home() / "auth.json"
     if not auth.exists():
         return False, "not logged in — run: codex login"
     try:
         d = json.loads(auth.read_text())
     except Exception:
-        return False, "~/.codex/auth.json is unreadable"
+        return False, "Codex auth.json is unreadable"
     if not ((d.get("tokens") or {}).get("access_token") or d.get("OPENAI_API_KEY")):
-        return False, "no usable credential in ~/.codex/auth.json"
+        return False, "no usable credential in Codex auth.json"
     mode = "ChatGPT subscription" if (d.get("tokens") or {}).get("access_token") else "API key"
     return True, mode
 
@@ -93,25 +153,39 @@ def thread_for(agent: str) -> str | None:
 
 def clear_thread(agent: str) -> None:
     _threads.pop(agent, None)
+    _persist()
 
 
-def _argv(prompt: str, workdir: str, thread: str | None) -> list[str]:
+_MAX_PROMPT_CHARS = 4000  # well below the ~8191-char Windows CLI limit
+
+def _argv(prompt: str, workdir: str, thread: str | None,
+          model: str | None = None) -> list[str]:
     # Codex sandboxes by default and would stop to ask before writing. There is
     # no interactive terminal here, so an approval prompt just hangs the turn;
     # the bridge is already an authorised agent running as the owner.
     flags = ["--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"]
+    mflag = ["-m", model] if model else []
+
+    # Windows CLI limit is ~8191 chars; long prompts (journal context included)
+    # cause "The command line is too long." Write to a temp file and pass the
+    # path instead when the prompt exceeds the safe threshold.
+    if len(prompt) > _MAX_PROMPT_CHARS:
+        tmp = Path(workdir) / ".codex_prompt.txt"
+        tmp.write_text(prompt, encoding="utf-8")
+        prompt_arg = f"@{tmp.name}"
+    else:
+        prompt_arg = prompt
+
     if thread:
-        # `resume` takes no --cd: the working directory belongs to the thread
-        # and is restored with it. Passing it anyway makes codex exit 2 with a
-        # usage message, which reads like a malformed command rather than an
-        # unsupported flag.
-        return [CODEX_BIN, "exec", "resume", *flags, thread, prompt]
-    return [CODEX_BIN, "exec", *flags, "--cd", workdir, prompt]
+        return [CODEX_BIN, "exec", "resume", *flags, *mflag, thread, prompt_arg]
+    return [CODEX_BIN, "exec", *flags, *mflag, "--cd", workdir, prompt_arg]
 
 
-def _extract(stdout: str) -> tuple[str, str | None, dict]:
-    """Pull the reply, the thread id and usage out of the JSON event stream."""
+def _extract(stdout: str) -> tuple[str, str | None, dict, list[str]]:
+    """Pull the reply, the thread id, usage and error messages out of the JSON
+    event stream."""
     parts: list[str] = []
+    errors: list[str] = []
     thread: str | None = None
     usage: dict = {}
     for line in stdout.splitlines():
@@ -131,37 +205,96 @@ def _extract(stdout: str) -> tuple[str, str | None, dict]:
                 parts.append(item["text"])
         elif t == "turn.completed":
             usage = ev.get("usage") or {}
+        elif t == "turn.failed" and (ev.get("error") or {}).get("message"):
+            errors.append(ev["error"]["message"])
+            parts.append(f"⚠️ codex: {ev['error']['message']}")
         elif t == "error" and ev.get("message"):
+            errors.append(ev["message"])
             parts.append(f"⚠️ codex: {ev['message']}")
-    return "\n\n".join(parts).strip(), thread, usage
+    return "\n\n".join(parts).strip(), thread, usage, errors
+
+
+_running: dict[str, asyncio.Task] = {}
+
+
+async def interrupt(agent: str) -> bool:
+    task = _running.get(agent)
+    if task is None or task.done() or task is asyncio.current_task():
+        return False
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    return True
+
+
+async def _kill_tree(proc) -> None:
+    # A dedicated POSIX process group also contains tools spawned by Codex.
+    try:
+        if os.name == "nt":
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill", "/PID", str(proc.pid), "/T", "/F",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await killer.wait()
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, OSError):
+        pass
+    if proc.returncode is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+    await proc.wait()
 
 
 async def run_turn(agent: str, prompt: str, workdir: str,
                    timeout: float = 900.0) -> tuple[str, dict]:
     """Run one turn. Returns (reply_text, usage). Raises on process failure."""
+    if agent in _running:
+        raise RuntimeError("Codex turn already running for this route")
     thread = thread_for(agent)
-    argv = _argv(prompt, workdir, thread)
+    argv = _argv(prompt, workdir, thread, _models.get(agent) or default_model())
     proc = await asyncio.create_subprocess_exec(
         *argv,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=workdir,
-        env={**os.environ, "PATH": os.environ.get("PATH", "") + ":" + str(Path.home() / ".local/bin")},
+        start_new_session=os.name != "nt",
+        env={**os.environ, "BRIDGE_AGENT": agent.split("@", 1)[0],
+             "BRIDGE_ROUTE": agent, "BRIDGE_STATE_DIR": str(STATE_DIR),
+             "PATH": os.environ.get("PATH", "") + os.pathsep + str(Path.home() / ".local/bin")},
     )
+    _running[agent] = asyncio.current_task()
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        raise RuntimeError(f"codex timed out after {int(timeout)}s")
+    except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+        await _kill_tree(proc)
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        raise RuntimeError(f"codex timed out after {int(timeout)}s") from exc
+    finally:
+        _running.pop(agent, None)
 
-    text, new_thread, usage = _extract(out.decode("utf-8", "replace"))
+    text, new_thread, usage, errors = _extract(out.decode("utf-8", "replace"))
     if new_thread:
         _threads[agent] = new_thread
     elif thread:
         # A resumed turn does not re-announce the thread; keep the one we had.
         _threads[agent] = thread
+    _persist()
 
-    if proc.returncode != 0 and not text:
+    # A quota error arrives as an event, not a failed exit, so it used to come
+    # back as an ordinary reply and the session never left Codex. Raise it so
+    # feed() sees it and switches the session back to Claude.
+    exhausted = [e for e in errors if is_usage_exhausted(e)]
+    if exhausted:
+        raise RuntimeError(f"codex usage exhausted: {exhausted[-1][:300]}")
+
+    if errors:
+        raise RuntimeError(f"codex turn failed: {errors[-1][:300]}")
+    if proc.returncode != 0:
         tail = (err.decode("utf-8", "replace") or "").strip().splitlines()[-3:]
         raise RuntimeError(f"codex exited {proc.returncode}: {' / '.join(tail)[:300]}")
     return text or "(codex returned nothing)", usage

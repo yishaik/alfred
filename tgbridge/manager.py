@@ -666,6 +666,14 @@ class AgentManager:
             if committed.returncode:
                 log.error("offsite commit failed: %s", committed.stderr.strip()[:300])
                 return
+            # Rebase onto the remote first: a commit made elsewhere (a PR, a
+            # CI change) otherwise rejects every push as non-fast-forward and
+            # backups pile up locally. Dated backup files never conflict.
+            rebased = git("pull", "--rebase", timeout=300)
+            if rebased.returncode:
+                log.warning("offsite pull --rebase failed, pushing anyway: %s",
+                            rebased.stderr.strip()[:300])
+                git("rebase", "--abort")
             pushed = git("push", timeout=300)
             if pushed.returncode:
                 log.error("offsite push failed (commit is local): %s",

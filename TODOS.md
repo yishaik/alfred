@@ -1,5 +1,18 @@
 # Alfred — Task Queue
 
+## Model continuity — 2026-10-22
+
+- [x] Discover provider model catalogs; preserve Codex threads across model changes.
+- [x] Persist route-isolated handoff history and external thread/model preferences.
+- [x] Serialize external turns and guard engine/model changes while busy.
+- [x] Replace panel Engine prompt forwarding with a session-bound provider/model
+  picker; share transitions with /engine and support old panel buttons.
+- [ ] Orchestrator activation and live /model + Claude/Codex round-trip validation.
+- [ ] Repair existing Windows Napkin native dependency (exact npm package is 404).
+- [ ] Repair existing TV command registration test failure (reproduced at original HEAD).
+
+See agent-worksheet-2026-10-22.md and docs/model-handoff.md for evidence and limits.
+
 Consolidated from PLAN-*.md files. Agent: work top-to-bottom; one task at a time; update status here.
 
 ## Status legend
@@ -95,6 +108,14 @@ Deferred deliberately on 2026-08-01 — the critical read path is covered.
 ---
 
 ## ✅ Done (recent)
+- [x] **Direct LG webOS remote** — `/tv`, Panel entry, inline controls,
+      saved pairing, apps/HDMI, reconnects, visible errors and Wake-on-LAN;
+      direct state/catalog reads verified on the local TV — 2026-09-12.
+      [Setup](docs/tv-remote.md).
+- [ ] **Load and check `/tv` in Telegram after the next orchestrator-managed
+      bridge process restart** — source is ready and local pairing is saved;
+      this session did not restart the bridge or send Telegram test messages.
+      Verify navigation and physical Wake-on-LAN after reload.
 - [x] **Evidence-gated Manager Loop** — `/loop <goal>` now plans measurable
       phases, implements them in an isolated session, requires independent
       verification evidence, performs a final integration review, persists
@@ -151,3 +172,36 @@ Deferred deliberately on 2026-08-01 — the critical read path is covered.
       token and exits rc=75; supervisor waits 15 min — 2026-07-31
 - [x] **Gentler restart ladder** — supervisor 5/5/15/30/60/300s, so a DNS blip no
       longer costs 5 minutes offline — 2026-07-31
+
+## Audit remediation — 2026-10-23
+- [x] #48 safe test collection and offline CI. See worksheet for validation.
+
+- [x] #49: missing optional Napkin integration is explicitly skipped; mocked transport success/failure and vault isolation are covered. Full pytest and selftest pass.
+
+- [x] #36: dynamic picker separates OpenRouter provider from model ID; paid opt-in and Claude fallback have regression coverage.
+
+- [x] #38: cancel/timeout/stop reap Codex process trees; intentional cancellation never replays to Claude. Real local subprocess regression tests added.
+
+- [x] #37: Telegram submits owned background tasks while feed/collect remain awaitable; FIFO, prompt responsiveness and shutdown cancellation tested.
+
+- [x] #39: Codex exports agent, route and state directory to MCP; RPC resolves exact session and rejects unknown/mismatched identities. Legacy known-agent callers remain supported.
+
+- [x] #40: RPC calls the shared session permission gate; explicit read-only bridge tools remain usable; writes require approval or auto-approval and are always denied for read-only roles.
+
+- [x] #41: rejected scheduled turns retain jobs with bounded exponential retry, including recurring occurrences; accepted one-shots are removed.
+
+- [x] #42: early Telegram authorization gate validates chat and human actor for every update; owner default, optional explicit delegates, anonymous/bot rejection documented and tested.
+
+- [x] #43: shared CODEX_HOME resolver for auth, config and model cache; custom-home test uses synthetic credentials only.
+
+- [x] #44: explicit external answers use bounded durable handoff and retain the full returned text; UI accurately discloses bounded history; automatic quick-reply limits retained.
+
+- [x] #45: /model clears paid one-shot selection before catalog discovery; regression covers cancellation order.
+
+- [x] #46: model keyboards read cache only; discovery runs in a bounded worker thread, coalesces concurrent callers and retains cached results on failure. Unverified fallback IDs removed.
+
+- [x] #47: OpenAI transcription failure falls back to configured Groq; success stops the chain; missing credentials never trigger a request.
+
+- [x] #64: explicit one-shot selection works while Codex is active, uses real HTTP adapter under MockTransport and preserves native engine. Routed collect results resolve capture futures without losing FIFO.
+
+- [x] #65: read-only native engine switching/failover fails closed; SDK readonly options cannot bypass permissions and exclude write/shell/delegation tools. Added Linux/Windows/macOS CI matrix.

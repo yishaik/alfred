@@ -337,6 +337,23 @@ def save_json(path: Path, data) -> None:
         tmp.replace(path)
 
 
+def authorized_user(user_id: int | None, is_bot: bool = False) -> bool:
+    """Private-chat owner plus explicitly delegated human user IDs only."""
+    allowed = {CHAT_ID} if CHAT_ID > 0 else set()
+    for entry in os.environ.get("BRIDGE_ALLOWED_USER_IDS", "").split(","):
+        entry = entry.strip()
+        if entry.isdecimal() and int(entry) > 0:
+            allowed.add(int(entry))
+    return not is_bot and user_id in allowed
+
+
+def authorized_update(update) -> bool:
+    chat = getattr(update, "effective_chat", None)
+    user = getattr(update, "effective_user", None)
+    return bool(chat and user and authorized_chat(chat.id) and
+                authorized_user(getattr(user, "id", None), getattr(user, "is_bot", True)))
+
+
 def authorized_chat(chat_id: int) -> bool:
     return chat_id == CHAT_ID or (GROUP_ID and chat_id == GROUP_ID)
 

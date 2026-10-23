@@ -18,7 +18,7 @@ from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
                       ReplyKeyboardMarkup, ReplyKeyboardRemove, Update)
 from telegram.ext import ContextTypes
 
-from . import metrics, router, voice
+from . import metrics, router, voice, tv_handlers
 from .config import (APP_LOG_FILE, AUDIT_FILE, GROUP_ID, INBOX, MAX_JOBS,
                      PEERS, authorized_chat)
 from .manager import AgentManager
@@ -131,7 +131,8 @@ def _drop_quickbar(rows: list[list[InlineKeyboardButton]]) -> list[list[InlineKe
 
 
 def panel_kb(s) -> InlineKeyboardMarkup:
-    model_label = f"🧠 {s.model or 'default'}"
+    from .engine_ui import active_model
+    model_label = f"🧠 {active_model(s)}"
     auto_label = "🔓 auto-approve" if s.cfg.auto_approve else "🔐 tap-to-approve"
     sec_label = "📋 secretary ●" if s.cfg.secretary else "📋 secretary"
     engine_label = f"🔀 {getattr(s, 'engine', 'claude')}"
@@ -142,10 +143,11 @@ def panel_kb(s) -> InlineKeyboardMarkup:
          InlineKeyboardButton("🗜 Compact", callback_data="send:/compact"),
          InlineKeyboardButton("📊 Context", callback_data="send:/context")],
         [InlineKeyboardButton(model_label, callback_data="menu:model"),
-         InlineKeyboardButton(engine_label, callback_data="send:/engine"),
+         InlineKeyboardButton(engine_label, callback_data=f"eng:{s.sid}:menu"),
          InlineKeyboardButton("🤖 Agents", callback_data="menu:agents")],
         [InlineKeyboardButton("⏰ Jobs", callback_data="menu:jobs"),
-         InlineKeyboardButton("📂 Status", callback_data="act:status")],
+         InlineKeyboardButton("📂 Status", callback_data="act:status"),
+         InlineKeyboardButton("📺 שלט", callback_data="tv:panel")],
         [InlineKeyboardButton(auto_label, callback_data="act:auto"),
          InlineKeyboardButton(sec_label, callback_data="act:secretary")],
         [InlineKeyboardButton("✨ Features", callback_data="menu:features"),
@@ -172,36 +174,77 @@ def features_kb(s) -> InlineKeyboardMarkup:
     ])
 
 
-def model_kb(current: str) -> InlineKeyboardMarkup:
-    def lbl(name, val):
-        return ("● " if current == val else "") + name
-    # Claude models = the durable SESSION model (subscription, set_model live).
-    # Pinned dateless ids (Opus 5.5, Opus 5, Sonnet 5, Fable 5); Haiku stays the
-    # evergreen alias. External (paid) models live in a SEPARATE picker
-    # (🌐 חיצוניים) because they can't be a session model.
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(lbl("Opus 5.5", "claude-opus-5-5"), callback_data="model:claude-opus-5-5"),
-         InlineKeyboardButton(lbl("Opus 5", "claude-opus-5"), callback_data="model:claude-opus-5")],
-        [InlineKeyboardButton(lbl("Sonnet 5.5", "claude-sonnet-5-5"), callback_data="model:claude-sonnet-5-5"),
-         InlineKeyboardButton(lbl("Sonnet 5", "claude-sonnet-5"), callback_data="model:claude-sonnet-5")],
-        [InlineKeyboardButton(lbl("Fable 5.1", "claude-fable-5-1"), callback_data="model:claude-fable-5-1"),
-         InlineKeyboardButton(lbl("Haiku", "haiku"), callback_data="model:haiku")],
-        [InlineKeyboardButton(lbl("Default", ""), callback_data="model:"),
-         InlineKeyboardButton("🌐 חיצוניים", callback_data="menu:xmodel")],
-        [InlineKeyboardButton("⬅ Back", callback_data="menu:back")],
-    ])
+def model_kb(s) -> InlineKeyboardMarkup:
+    # Engine-aware: shows the ACTIVE engine's models. Codex/Antigravity models
+    # are per-agent overrides on that engine; Claude models are the durable
+    # session model. Each engine gets its own callback prefix so paths don't mix.
+    engine = getattr(s, "engine", "claude")
+    if engine in ("codex", "antigravity"):
+        from . import antigravity_engine, codex_engine
+        mod = codex_engine if engine == "codex" else antigravity_engine
+        prefix = "cmodel" if engine == "codex" else "amodel"
+        cur = mod.get_model(s.skey)
+        rows, row = [], []
+        for mid, label in getattr(s, "model_catalog", {}).get(engine, []):
+            row.append(InlineKeyboardButton(("● " if cur == mid else "") + label,
+                                            callback_data=f"{prefix}:{mid}"))
+            if len(row) == 2:
+                rows.append(row); row = []
+        if row:
+            rows.append(row)
+        if not rows:
+            rows.append([InlineKeyboardButton("(no models found)", callback_data="menu:back")])
+        rows.append([InlineKeyboardButton(("● " if not cur else "") + "default",
+                                          callback_data=f"{prefix}:")])
+        rows.append([InlineKeyboardButton("↻ Refresh", callback_data="menu:model"),
+                     InlineKeyboardButton("⬅ Back", callback_data="menu:back")])
+        return InlineKeyboardMarkup(rows)
+
+    current = s.cfg.model
+    models = getattr(s, "model_catalog", {}).get("claude") or [
+        ("opus", "Opus (alias)"), ("sonnet", "Sonnet (alias)"), ("haiku", "Haiku (alias)")]
+    buttons = [InlineKeyboardButton(("● " if current == mid else "") + label,
+                                   callback_data=f"model:{mid}") for mid, label in models]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows += [[InlineKeyboardButton("Default", callback_data="model:"),
+              InlineKeyboardButton("🌐 חיצוניים", callback_data="menu:xmodel")],
+             [InlineKeyboardButton("↻ Refresh", callback_data="menu:model"),
+              InlineKeyboardButton("⬅ Back", callback_data="menu:back")]]
+    return InlineKeyboardMarkup(rows)
 
 
-def xmodels_kb() -> InlineKeyboardMarkup:
-    """External (paid, opt-in via OpenRouter) models picker. Tapping one PINS the
-    NEXT user message to that provider (one-shot) — it is NOT the durable session
-    model (Claude models are). Callback data: xmodel:<provider>."""
-    def x(name, prov):
-        return InlineKeyboardButton(name, callback_data=f"xmodel:{prov}")
-    return InlineKeyboardMarkup([
-        [x("GPT-5.5", "gpt-5.5"), x("GPT-5.4", "gpt-5.4"), x("GLM-5.2", "glm-5.2")],
-        [InlineKeyboardButton("⬅ מודלים", callback_data="menu:model")],
+def xmodels_kb(page: int = 0) -> InlineKeyboardMarkup:
+    """Dynamic external (OpenRouter) models picker with pagination and refresh.
+    Tapping one PINS the NEXT user message to that provider (one-shot)."""
+    from .model_catalog import openrouter_models
+    all_models = openrouter_models()
+    page_size = 6
+    total_pages = max(1, (len(all_models) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * page_size
+    current_page_models = all_models[start:start + page_size]
+
+    def x(mid, label):
+        return InlineKeyboardButton(label, callback_data=f"xmodel:{mid}")
+
+    buttons = [x(mid, label) for mid, label in current_page_models]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀", callback_data=f"xpage:{page - 1}"))
+    nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data=f"xpage:{page}"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("▶", callback_data=f"xpage:{page + 1}"))
+    if len(nav) > 1:
+        rows.append(nav)
+
+    rows.append([
+        InlineKeyboardButton("↻ רענן", callback_data="xmodel_refresh"),
+        InlineKeyboardButton("⬅ מודלים", callback_data="menu:model"),
     ])
+    return InlineKeyboardMarkup(rows)
 
 
 def router_kb(cfg) -> InlineKeyboardMarkup:
@@ -1044,58 +1087,23 @@ async def cmd_peers(update: Update, ctx):
 
 
 async def cmd_engine(update: Update, ctx):
-    """Switch this agent between the Claude and Codex subscriptions.
-
-    Per-session on purpose: the point is to move one conversation onto the
-    other plan without disturbing the other agents.
-    """
-    from . import codex_engine
+    """Engine menu; command arguments use the same transition as panel buttons."""
+    from .engine_ui import BACKENDS, card, select
     s = await _session(update, ctx)
     arg = " ".join(ctx.args).strip().lower() if ctx.args else ""
-
-    if not arg:
-        ok, mode = codex_engine.available()
-        thread = codex_engine.thread_for(s.cfg.name)
-        cur = getattr(s, "engine", "claude")
-        # Tappable provider picker (send: callbacks feed the command). Only offer
-        # providers that are actually available; codex is gated on availability.
-        def _lbl(name, emoji):
-            return ("✓ " if cur == name else "") + emoji + " " + name
-        row = [InlineKeyboardButton(_lbl("claude", "🟣"), callback_data="send:/engine claude")]
-        if ok:
-            row.append(InlineKeyboardButton(_lbl("codex", "🟢"), callback_data="send:/engine codex"))
-        rows = [row, [InlineKeyboardButton("♻️ reset codex thread", callback_data="send:/engine reset")]]
-        await update.message.reply_text(
-            f"🔀 engine: *{cur}*\n"
-            f"codex: {'✅ ' + mode if ok else '❌ ' + mode}\n"
-            + (f"codex thread: `{thread[:8]}…`\n" if thread else "")
-            + "\nבחר ספק:",
-            parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
-        return
-
     if arg == "reset":
-        codex_engine.clear_thread(s.cfg.name)
-        await update.message.reply_text("codex thread cleared — next codex turn starts fresh")
-        return
-
-    if arg not in ("claude", "codex"):
-        await update.message.reply_text("usage: /engine [claude|codex|reset]")
-        return
-
-    if arg == "codex":
-        # Check now rather than failing on the next message, when the reason
-        # would be buried in a fallback notice.
-        ok, why = codex_engine.available()
-        if not ok:
-            await update.message.reply_text(f"❌ cannot switch: {why}")
+        if s.busy:
+            await update.message.reply_text("Wait for the active answer before resetting threads.")
             return
-
-    s.engine = arg
-    note = ("\n\nNote: the bridge's own tools (files, memory, scheduling, peers) "
-            "and the guard hooks are Claude-side. Codex has its own file and "
-            "shell tools, and answers whole rather than streaming."
-            if arg == "codex" else "")
-    await update.message.reply_text(f"🔀 engine → *{arg}*{note}", parse_mode="Markdown")
+        for backend in BACKENDS.values():
+            backend.clear_thread(s.skey)
+        notice = "Native threads cleared; conversation history is retained."
+    elif arg:
+        notice = select(s, arg)[1]
+    else:
+        notice = ""
+    text, kb = card(s, notice)
+    await update.message.reply_text(text, reply_markup=kb)
 
 
 async def cmd_jevcompact(update: Update, ctx):
@@ -1239,7 +1247,16 @@ async def cmd_routes(update: Update, ctx):
 
 
 def _model_picker_text(s) -> str:
-    """Header for the Claude session-model picker (/model)."""
+    """Header for the model picker — shows the ACTIVE engine's models (/model)."""
+    engine = getattr(s, "engine", "claude")
+    if engine == "antigravity":
+        from . import antigravity_engine
+        return ("🧠 מודל Antigravity (מנוע פעיל):\n"
+                f"נוכחי: {antigravity_engine.get_model(s.skey) or 'default'}")
+    if engine == "codex":
+        from . import codex_engine
+        return ("🧠 מודל Codex (מנוע פעיל):\n"
+                f"נוכחי: {codex_engine.get_model(s.skey) or 'default'}")
     return (
         "🧠 בחר מודל שיחה (Claude, מנוי — משתנה מיידית):\n"
         f"נוכחי: {_pretty_model(s.cfg.model) or 'default'}\n"
@@ -1248,22 +1265,27 @@ def _model_picker_text(s) -> str:
 
 
 def _xmodel_picker_text() -> str:
-    """Header for the external (paid) one-shot model picker (/models)."""
+    """Header for the dynamic external model picker (/models)."""
     return (
-        "🌐 מודלים חיצוניים (OpenRouter — בתשלום לפי טוקן, מכסה יומית).\n"
-        "בחירה כאן עונה על ההודעה הבאה בלבד (פעם אחת), לא משנה את מודל השיחה.\n"
-        "קיצורים בצ'אט: !gpt / !gpt54 / !glm.")
+        "🌐 מודלים חיצוניים (OpenRouter — נטענים דינאמית בלייב):\n"
+        "בחירה במודל מצמידה אותו לתור הבא עם הקשר מוגבל מהיומן המשותף.\n"
+        "קיצורים בצ'אט: !or <model> <שאלה>, !gpt, !deepseek, !grok, !gemini.")
 
 
 async def cmd_model(update: Update, ctx):
-    """Claude session-model picker (durable, subscription)."""
+    """Session-model picker; also cancels any pending paid one-shot pin."""
     s = await _session(update, ctx)
+    s._external_pin = ""
+    from .model_catalog import refresh
+    await refresh(s)
     await update.message.reply_text(
-        _model_picker_text(s), reply_markup=model_kb(s.cfg.model))
+        _model_picker_text(s), reply_markup=model_kb(s))
 
 
 async def cmd_models(update: Update, ctx):
     """External one-shot model picker (paid, opt-in via OpenRouter)."""
+    from .model_catalog import refresh_openrouter_models
+    await refresh_openrouter_models()
     await update.message.reply_text(
         _xmodel_picker_text(), reply_markup=xmodels_kb())
 
@@ -1377,7 +1399,7 @@ async def cmd_cr(update: Update, ctx):
     """Code-review mini-app (#21): a shortcut to the /code-review skill."""
     s = await _session(update, ctx)
     args = " ".join(ctx.args or []).strip()
-    await s.feed(f"/code-review {args}".strip(), echo=True)
+    await s.submit(f"/code-review {args}".strip(), echo=True)
 
 
 async def cmd_research(update: Update, ctx):
@@ -1388,7 +1410,7 @@ async def cmd_research(update: Update, ctx):
         await update.message.reply_text(
             "usage: /research <question> — I'll run a deep, cited research pass.")
         return
-    await s.feed(
+    await s.submit(
         "Use the deep-research skill to research this thoroughly and return a "
         f"cited report: {q}")
 
@@ -1402,7 +1424,7 @@ async def cmd_plan(update: Update, ctx):
     jobs = m.scheduler.list_jobs() if m.scheduler else []
     agenda = build_agenda(jobs, _t.time()) or "Nothing scheduled in the next 24h."
     extra = " ".join(ctx.args or []).strip()
-    await s.feed(
+    await s.submit(
         "[daily plan] Build me a focused, realistically-ordered plan for today "
         "— what to tackle first and why. Ask at most one clarifying question, "
         "only if truly needed.\n\n"
@@ -1556,7 +1578,7 @@ async def _run_quick(update: Update, ctx, entry) -> None:
     kind, target = entry
     if kind == "send":
         s = await _session(update, ctx)
-        await s.feed(target, echo=True)
+        await s.submit(target, echo=True)
         return
     fn = globals().get(f"cmd_{target}")
     if not fn:
@@ -1575,13 +1597,17 @@ async def on_text(update: Update, ctx):
     if key in _SEEN_MSGS:
         return
     _SEEN_MSGS.append(key)
-    s = await _session(update, ctx)
     text = msg.text
     # A quick-bar tap arrives as ordinary text. Turn it back into the command it
     # stands for, before it is treated as something to say to the agent.
     if text in QUICK_BAR:
         await _run_quick(update, ctx, QUICK_BAR[text])
         return
+    # Older remote keyboards use the direct client too, without starting an agent.
+    if text in tv_handlers.LEGACY:
+        await tv_handlers.legacy_tap(update, ctx)
+        return
+    s = await _session(update, ctx)
     # Resolve a pending "Other / type your answer" question without re-feeding Claude
     for qid, st in list(s.questions.items()):
         if st.get("waiting_text") and not st["future"].done():
@@ -1599,7 +1625,7 @@ async def on_text(update: Update, ctx):
     if r and (r.text or r.caption) and not text.startswith("/"):
         text = f"[replying to: «{(r.text or r.caption)[:300]}»]\n{text}"
     s.last_user_msg_id = msg.message_id
-    await s.feed(text, TurnSource(), echo=msg.text.startswith("/"))
+    await s.submit(text, TurnSource(), echo=msg.text.startswith("/"))
 
 
 async def on_edited(update: Update, ctx):
@@ -1612,10 +1638,10 @@ async def on_edited(update: Update, ctx):
                                          _route_thread_id(msg))
     if msg.message_id == s.last_user_msg_id and s.busy:
         await s.interrupt()
-        await s.feed(f"[the user corrected their message; use this version instead] "
+        await s.submit(f"[the user corrected their message; use this version instead] "
                      f"{msg.text}")
     else:
-        await s.feed(f"[the user edited an earlier message; updated version:] "
+        await s.submit(f"[the user edited an earlier message; updated version:] "
                      f"{msg.text}")
 
 
@@ -1636,7 +1662,7 @@ async def on_reaction(update: Update, ctx):
         m = mgr(ctx)
         for s in list(m.sessions.values()):
             if s.chat_id == mr.chat.id and not s.busy:
-                await s.feed(
+                await s.submit(
                     "[user reacted 🔁 — please redo/retry your last response "
                     "with a different approach]", TurnSource())
                 return
@@ -1693,7 +1719,7 @@ async def on_media(update: Update, ctx):
             try:
                 await e["msg"].reply_text(
                     f"📎 album: {len(e['items'])} files saved → Claude")
-                await e["s"].feed(combined)
+                await e["s"].submit(combined)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -1705,14 +1731,14 @@ async def on_media(update: Update, ctx):
         return
 
     await msg.reply_text(f"📎 saved → {safe} → Claude")
-    await s.feed(note + (f"\n{cap}" if cap else ""))
+    await s.submit(note + (f"\n{cap}" if cap else ""))
 
 
 async def on_location(update: Update, ctx):
     s = await _session(update, ctx)
     loc = update.message.location
     await update.message.reply_text("📍 → Claude")
-    await s.feed(f"[received location: lat={loc.latitude:.6f}, "
+    await s.submit(f"[received location: lat={loc.latitude:.6f}, "
                  f"lon={loc.longitude:.6f}]")
 
 
@@ -1731,12 +1757,12 @@ async def on_voice(update: Update, ctx):
     text = await voice.transcribe(str(path))
     if text:
         await msg.reply_text(f"🎙 “{text[:500]}”")
-        await s.feed(text)
+        await s.submit(text)
     else:
         note = ("no transcription API configured (set OPENAI_API_KEY or "
                 "GROQ_API_KEY)" if not voice.available() else "transcription failed")
         await msg.reply_text(f"⚠️ {note}; passing the file to Claude")
-        await s.feed(f"[received voice note (untranscribed): {path}]")
+        await s.submit(f"[received voice note (untranscribed): {path}]")
 
 
 # --------------------------------------------------------------------------- #
@@ -1745,7 +1771,7 @@ async def on_voice(update: Update, ctx):
 # buttons that change agent/bridge state: admin only (see config.is_admin)
 _PRIV_CB = ("act:restart", "act:auto", "act:secretary", "model:", "xmodel:",
             "voi:", "agn", "ags:", "agr:", "agx:", "agX:", "rt:", "job:cancel:",
-            "feat:", "menu:router", "menu:agents")
+            "feat:", "menu:router", "menu:agents", "cmodel:", "amodel:", "eng:")
 
 
 def _admin_user(update: Update) -> bool:
@@ -1770,6 +1796,39 @@ def admin_only(fn):
     return wrapped
 
 
+async def _apply_model_choice(q, s, m, prefix, mid, *, bound=False):
+    if s.busy:
+        await _edit(q, "⏳ יש תשובה בתהליך. החלף מודל בסיום התשובה.", panel_kb(s))
+        return
+    expected = {"model": "claude", "amodel": "antigravity", "cmodel": "codex"}[prefix]
+    if s.engine != expected:
+        await _edit(q, "רשימת המודלים שייכת למנוע אחר. פתח /model מחדש.", panel_kb(s))
+        return
+    if expected == "claude":
+        # Apply before saving, so a rejected model does not become a durable pin.
+        if s.client and s.connected:
+            s.busy = True
+            try:
+                await s.client.set_model(mid or None)
+            except Exception as exc:
+                await _edit(q, f"❌ לא ניתן להחליף מודל: {exc}", panel_kb(s))
+                return
+            finally:
+                s.busy = False
+                asyncio.create_task(s._drain())
+        s.cfg.model = mid
+        s.model = mid
+        s._last_applied_model = mid
+        m.save_agents()
+    else:
+        from . import antigravity_engine, codex_engine
+        mod = codex_engine if expected == "codex" else antigravity_engine
+        mod.set_model(s.skey, mid or None)
+    from .engine_ui import bind_models
+    kb = bind_models(model_kb(s), s.sid) if bound else model_kb(s)
+    await _edit(q, _model_picker_text(s), kb)
+
+
 async def on_callback(update: Update, ctx):
     q = update.callback_query
     if not authorized_chat(update.effective_chat.id):
@@ -1785,7 +1844,7 @@ async def on_callback(update: Update, ctx):
     # session-scoped callbacks carry a sid: pm/qp/qt/qd/qo/bt/qq
     parts = data.split(":")
     tag = parts[0]
-    if tag in ("pm", "qp", "qt", "qd", "qo", "bt", "ud", "ss", "sf", "qq"):
+    if tag in ("pm", "qp", "qt", "qd", "qo", "bt", "ud", "ss", "sf", "qq", "eng"):
         s = m.find_by_sid(int(parts[1])) if len(parts) > 1 and parts[1].isdigit() else None
         if not s:
             try:
@@ -1804,8 +1863,13 @@ async def on_callback(update: Update, ctx):
     chat_id, thread_id = update.effective_chat.id, _route_thread_id(q.message)
     s = await m.session_for_route(chat_id, thread_id)
 
-    if data.startswith("send:"):
-        await s.feed(data[5:], echo=True)
+    if data in ("send:/engine", "menu:engine"):
+        # Compatibility for panels already posted before the upgrade.
+        from .engine_ui import card
+        text, kb = card(s)
+        await _edit(q, text, kb)
+    elif data.startswith("send:"):
+        await s.submit(data[5:], echo=True)
     elif data == "act:interrupt":
         await s.interrupt()
     elif data == "act:restart":
@@ -1830,9 +1894,23 @@ async def on_callback(update: Update, ctx):
                        "restarting session…", panel_kb(s))
         await s.restart(resume=True, note="")
     elif data == "menu:model":
-        await _edit(q, _model_picker_text(s), model_kb(s.cfg.model))
+        from .model_catalog import refresh
+        await refresh(s)
+        await _edit(q, _model_picker_text(s), model_kb(s))
     elif data == "menu:xmodel":
-        await _edit(q, _xmodel_picker_text(), xmodels_kb())
+        from .model_catalog import refresh_openrouter_models
+        await refresh_openrouter_models()
+        await _edit(q, _xmodel_picker_text(), xmodels_kb(0))
+    elif data.startswith("xpage:"):
+        try:
+            p = int(data.split(":", 1)[1])
+        except ValueError:
+            p = 0
+        await _edit(q, _xmodel_picker_text(), xmodels_kb(p))
+    elif data == "xmodel_refresh":
+        from .model_catalog import refresh_openrouter_models
+        await refresh_openrouter_models(force_refresh=True)
+        await _edit(q, _xmodel_picker_text(), xmodels_kb(0))
     elif data == "menu:router":
         text, kb = await _router_card()
         await _edit(q, text[:4000], kb)
@@ -1849,31 +1927,18 @@ async def on_callback(update: Update, ctx):
         await _edit(q, text[:4000], kb)
     elif data == "menu:back":
         await _edit(q, "Control panel:", panel_kb(s))
-    elif data.startswith("model:"):
-        model = data.split(":", 1)[1]
-        s.cfg.model = model
-        s.model = model
-        m.save_agents()
-        applied = "live"
-        if s.client and s.connected:
-            try:
-                await s.client.set_model(model or None)
-            except Exception:
-                applied = "after /restart"
-        else:
-            applied = "after /restart"
-        await _edit(q, f"🧠 model → {model or 'default'} ({applied})", panel_kb(s))
+    elif data.startswith(("model:", "amodel:", "cmodel:")):
+        prefix, mid = data.split(":", 1)
+        await _apply_model_choice(q, s, m, prefix, mid)
     elif data.startswith("xmodel:"):
         prov = data.split(":", 1)[1]
-        # one-shot pin: the NEXT user message is answered by this external
-        # (paid, opt-in) provider, then the pin clears. Not the session model.
         s._external_pin = prov
-        pretty = {"gpt-5.5": "GPT-5.5", "gpt-5.4": "GPT-5.4",
-                  "glm-5.2": "GLM-5.2"}.get(prov, prov)
+        short = prov.split("/")[-1]
         await _edit(
             q,
-            f"🌐 ההודעה הבאה תיענה ע\"י {pretty} (חיצוני, OpenRouter — בתשלום, "
-            f"פעם אחת). לביטול: שלח /model או תבחר Default.",
+            f"🌐 ההודעה הבאה תיענה ע\"י {short} (OpenRouter דינאמי).\n"
+            f"יועבר הקשר מוגבל מהיומן המשותף; היסטוריה ישנה עשויה להישמט.\n"
+            f"לביטול: שלח /model.",
             panel_kb(s))
     elif data.startswith("voi:"):
         v = data.split(":", 1)[1]
@@ -1976,6 +2041,22 @@ async def _feature_cb(q, s, m, name: str):
 
 
 async def _session_cb(q, s, tag: str, rest: list[str]):
+    if tag == "eng":
+        from .engine_ui import card, select, bind_models
+        action = rest[0] if rest else "menu"
+        if action == "back":
+            await _edit(q, "Control panel:", panel_kb(s))
+        elif action == "models":
+            from .model_catalog import refresh
+            await refresh(s)
+            await _edit(q, _model_picker_text(s), bind_models(model_kb(s), s.sid))
+        elif action == "pick" and len(rest) >= 3 and rest[1] in ("model", "cmodel", "amodel"):
+            await _apply_model_choice(q, s, s.mgr, rest[1], ":".join(rest[2:]), bound=True)
+        else:
+            notice = "" if action == "menu" else select(s, action)[1]
+            text, kb = card(s, notice)
+            await _edit(q, text, kb)
+        return
     if tag == "ud":
         result = await s.undo(int(rest[0]))
         await _edit(q, (q.message.text or "") + f"\n{result}")
@@ -2063,7 +2144,7 @@ async def _session_cb(q, s, tag: str, rest: list[str]):
             await q.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
-        await s.feed(labels[idx], echo=True)
+        await s.submit(labels[idx], echo=True)
 
 
 async def _handle_page_cb(q, s, page_id: int, page_num: int):

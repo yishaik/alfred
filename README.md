@@ -120,6 +120,12 @@ and permission prompts as Telegram buttons.
 Dropped messages are announced (`🚦 …dropped: hop limit/rate limit`), never silent.
 
 ## Bridge commands
+
+**LG TV remote:** `/tv` opens a built-in webOS remote with a direct LAN
+connection, persistent pairing, navigation, audio, apps, HDMI and optional
+Wake-on-LAN. First use: `/tv connect <TV_IP>` and accept pairing on the TV.
+See [TV setup and commands](docs/tv-remote.md).
+
 `/start /panel /status /restart /interrupt /kill` ·
 `/agents /newagent /delagent /bind` ·
 `/loop <goal>` `/loop status|resume|cancel` ·
@@ -281,3 +287,19 @@ full `C:` can't break it.
 - The peer bus refuses to listen without a token, binds loopback by default
   (`BRIDGE_PEER_BIND`), and only accepts authenticated POSTs ≤64KB; still, keep
   it on a LAN/VPN, not the open internet.
+
+### Telegram actor authorization
+
+`BRIDGE_CHAT_ID` identifies the private-chat owner, who is allowed by default.
+When a forum group is enabled, group membership does not grant control.
+Set `BRIDGE_ALLOWED_USER_IDS` to a comma-separated list of additional trusted
+human user IDs if delegation is intended. This grants full bot control, not a
+read-only role. Anonymous/channel-authored updates and bot actors are rejected.
+The authorization gate runs before every update handler, including callbacks
+and reactions. Existing owner access is retained without configuration changes.
+
+Read-only orchestration roles stay on the Claude policy-enforced execution path.
+They cannot select or automatically fail over to unrestricted native engines.
+Their SDK tool allowlist excludes writes, shell execution and delegated agents;
+bridge RPC uses the same role policy. Ordinary agent engine switching remains
+available. CI covers offline tests on Linux, Windows and macOS.
