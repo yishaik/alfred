@@ -30,6 +30,7 @@ writer lock). Env kill switch: BRIDGE_ROUTER=0 disables everything.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -407,7 +408,12 @@ async def _llm_classify(text: str, session, cfg: RouterConfig) -> Decision:
     ork = os.environ.get("OPENROUTER_API_KEY", "")
     orm = clf.get("openrouter_model")
     if ork and orm:
-        attempts.append(("https://openrouter.ai/api/v1", ork, orm))
+        # openrouter_model may be a single id or a list: try each in order so a
+        # fast model answers most turns and an accurate one backstops it when the
+        # fast one returns unparseable JSON (free tiers are individually flaky).
+        for m in ([orm] if isinstance(orm, str) else orm):
+            if m:
+                attempts.append(("https://openrouter.ai/api/v1", ork, m))
 
     for base_url, key, model in attempts:
         try:
