@@ -197,3 +197,5 @@ Deferred deliberately on 2026-08-01 — the critical read path is covered.
 - [x] #44: explicit external answers use bounded durable handoff and retain the full returned text; UI accurately discloses bounded history; automatic quick-reply limits retained.
 
 - [x] #45: /model clears paid one-shot selection before catalog discovery; regression covers cancellation order.
+
+- [x] #46: model keyboards read cache only; discovery runs in a bounded worker thread, coalesces concurrent callers and retains cached results on failure. Unverified fallback IDs removed.

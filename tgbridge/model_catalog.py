@@ -97,7 +97,7 @@ _openrouter_cache: list[tuple[str, str]] = []
 _openrouter_cache_time: float = 0.0
 
 
-def openrouter_models(force_refresh: bool = False) -> list[tuple[str, str]]:
+def _fetch_openrouter_models(force_refresh: bool = False) -> list[tuple[str, str]]:
     """Dynamically fetch the latest frontier models from OpenRouter API.
     Groups by major frontier providers and extracts newest releases.
     Cached for 5 minutes unless force_refresh is True."""
@@ -118,17 +118,7 @@ def openrouter_models(force_refresh: bool = False) -> list[tuple[str, str]]:
         log.warning("OpenRouter dynamic model discovery failed: %s", e)
         if _openrouter_cache:
             return _openrouter_cache
-        return [
-            ("anthropic/claude-sonnet-5.5", "Claude Sonnet 5.5"),
-            ("anthropic/claude-opus-5.5", "Claude Opus 5.5"),
-            ("anthropic/claude-haiku-5.5", "Claude Haiku 5.5"),
-            ("openai/gpt-6.1-sol", "GPT-6.1 Sol"),
-            ("openai/gpt-6-luna", "GPT-6 Luna"),
-            ("google/gemini-4-argon", "Gemini 4 Argon"),
-            ("deepseek/deepseek-v4.1-flash", "DeepSeek V4.1 Flash"),
-            ("x-ai/grok-4.7", "Grok 4.7"),
-            ("mistralai/mistral-large-4-0", "Mistral Large 4"),
-        ]
+        return []  # No fabricated model IDs when discovery is unavailable.
 
     notable_providers = {
         "anthropic": "Anthropic",
@@ -170,3 +160,19 @@ def openrouter_models(force_refresh: bool = False) -> list[tuple[str, str]]:
         _openrouter_cache_time = now
     return _openrouter_cache
 
+
+
+_discovery_task = None
+
+
+def openrouter_models() -> list[tuple[str, str]]:
+    """Cache-only snapshot for synchronous keyboard rendering. Never does I/O."""
+    return list(_openrouter_cache)
+
+
+async def refresh_openrouter_models(force_refresh: bool = False):
+    """Bounded urllib discovery runs outside the event loop; coalesce callers."""
+    global _discovery_task
+    if _discovery_task is None or _discovery_task.done():
+        _discovery_task = asyncio.create_task(asyncio.to_thread(_fetch_openrouter_models, force_refresh))
+    return await asyncio.shield(_discovery_task)
