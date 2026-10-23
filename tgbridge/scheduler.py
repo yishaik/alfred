@@ -183,14 +183,16 @@ class Scheduler:
                 session.outbox.emit(f"{head}\n{job['text']}")
             else:
                 session.outbox.emit(f"{head} — running")
-                await session.feed(
+                accepted = await session.feed(
                     f"[scheduled job #{job['id']}] {job['text']}",
                     TurnSource(kind="sched"))
+                if accepted is False:
+                    raise RuntimeError("scheduled turn was not accepted")
             delivered = True
         except Exception:
             metrics.bump("sched_fail")
             log.exception("job %s delivery failed", job["id"])
-        if not delivered and not job.get("recur"):
+        if not delivered:
             # don't lose a one-shot reminder to a transient failure; back off
             # exponentially (60s, 120s, 240s) so a flapping target isn't hammered
             job["fails"] = job.get("fails", 0) + 1
