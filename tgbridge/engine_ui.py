@@ -26,6 +26,8 @@ def select(session, engine):
     """Change only the selected route. Never reset native threads or history."""
     if engine not in LABELS:
         return False, "❌ ספק לא מוכר. בחר מהרשימה."
+    if session.cfg.read_only and engine != "claude":
+        return False, "🔒 תפקיד לקריאה בלבד דורש מנוע שאוכף את ההרשאות שלו."
     if session.busy:
         return False, "⏳ יש תשובה בתהליך. החלף ספק בסיום התשובה."
     if session.engine == engine:

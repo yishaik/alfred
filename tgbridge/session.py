@@ -350,8 +350,12 @@ class AgentSession:
                            "append": prompt},
             can_use_tool=self._can_use_tool,
             include_partial_messages=True,
-            permission_mode="bypassPermissions" if self.cfg.auto_approve else None,
-            allowed_tools=list(SAFE_TOOLS) + list(bridgetools.ALLOWED),
+            permission_mode="bypassPermissions" if self.cfg.auto_approve and not self.cfg.read_only else None,
+            allowed_tools=(list(READ_ONLY_TOOLS) + [f"mcp__bridge__{name}" for name in bridgetools.READ_ONLY]
+                           if self.cfg.read_only else list(SAFE_TOOLS) + list(bridgetools.ALLOWED)),
+            disallowed_tools=(["Bash", "Write", "Edit", "NotebookEdit", "Task", "Agent"] +
+                              [name for name in bridgetools.ALLOWED if name.rsplit("__", 1)[-1] not in bridgetools.READ_ONLY]
+                              if self.cfg.read_only else []),
             mcp_servers={bridgetools.SERVER_NAME: bridge_server},
             hooks=guards.build_hooks(self),
             enable_file_checkpointing=True,
@@ -660,6 +664,11 @@ class AgentSession:
         # never started and nothing downstream changes. Failure falls back to
         # Claude rather than losing the turn.
         eng_name = getattr(self, "engine", "claude")
+        if self.cfg.read_only and eng_name != "claude":
+            # Native alternate engines do not yet enforce this role's policy.
+            eng_name = self.engine = "claude"
+            self.handoff.state["engine"] = "claude"
+            self.handoff.save()
         _ext = {"codex": codex_engine,
                 "antigravity": antigravity_engine}.get(eng_name) if not routed_first else None
         if _ext:
@@ -839,6 +848,8 @@ class AgentSession:
         the live session engine so later turns do not repeatedly hit Claude's
         exhausted allowance.
         """
+        if self.cfg.read_only:
+            return False
         prompt = self._turn_input_text
         ok, why = codex_engine.available()
         if not prompt or not ok:
@@ -1282,7 +1293,7 @@ class AgentSession:
                 # When no turn is in flight there is nothing to replay. Move the
                 # next turn immediately; an in-flight rejected turn is replayed
                 # when its ResultMessage arrives, avoiding duplicate answers.
-                if info.status == "rejected" and not self.busy:
+                if info.status == "rejected" and not self.busy and not self.cfg.read_only:
                     ok, _ = codex_engine.available()
                     if ok and self.engine != "codex":
                         self.engine = "codex"
