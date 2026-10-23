@@ -6,6 +6,20 @@ Resolve issues #36–#49 in separate tested PRs and merge in dependency order.
 ## Deviations
 User explicitly authorized push, separate PRs and ordered merges; supersedes local one-commit/no-push guidance. Use available POSIX Python instead of Windows venv. Never restart the live bridge or change credentials.
 
+## Current repair pass
+- Reproduced the Windows Napkin failure: `@shiftlabs/ferrosearch@0.1.1` is
+  referenced by the installed package but that version is not available from
+  npm, leaving `@shift-labs/ferrosearch-win32-x64-msvc` missing.
+- Added a local markdown fallback in `tgbridge/memory.py`. Pinned memory and
+  note CRUD/search continue to work when Napkin cannot initialise.
+- Updated the singleton self-test to report a skip when the live bridge owns
+  the lock port. This avoids treating the running production instance as a
+  self-test failure.
+- Verified `pytest -q`: 129 passed. Verified `selftest.py`: ALL OK.
+- Backup repo `D:\Projects\alfred-state-backup` is 56 commits ahead and 121
+  behind `origin/main`. No merge or push was performed; this needs a separate
+  controlled reconciliation.
+
 ## Completed
 - #48: Safe manual sender import, pytest discovery, registration mock, portable dev dependencies and offline CI. Validation: full pytest and compile checks.
 

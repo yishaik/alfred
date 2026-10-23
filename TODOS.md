@@ -8,7 +8,8 @@
 - [x] Replace panel Engine prompt forwarding with a session-bound provider/model
   picker; share transitions with /engine and support old panel buttons.
 - [ ] Orchestrator activation and live /model + Claude/Codex round-trip validation.
-- [ ] Repair existing Windows Napkin native dependency (exact npm package is 404).
+- [x] Add a local markdown fallback for the unavailable Windows Napkin native
+  dependency. The native dependency itself remains unavailable from npm.
 - [ ] Repair existing TV command registration test failure (reproduced at original HEAD).
 
 See agent-worksheet-2026-10-22.md and docs/model-handoff.md for evidence and limits.

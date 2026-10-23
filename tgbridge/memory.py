@@ -86,7 +86,16 @@ class Memory:
 
     def __init__(self, vault: str):
         self.vault = str(vault)
-        napkin_store.ensure_vault(self.vault)   # cheap if it already exists
+        self._napkin_usable = True
+        try:
+            napkin_store.ensure_vault(self.vault)   # cheap if it already exists
+        except napkin_store.NapkinError as e:
+            # Napkin is an optional index.  Keep the markdown vault usable when
+            # its native search dependency is unavailable (common on Windows).
+            log.warning("Napkin unavailable for %s; using local markdown fallback: %s",
+                        self.vault, e)
+            self._napkin_usable = False
+            self._notes_dir.mkdir(parents=True, exist_ok=True)
         self._prompt_cache: str | None = None   # render_prompt result; None = stale
 
     @property
@@ -156,14 +165,28 @@ class Memory:
         slug = _slug(text)
         path = f"notes/{slug}.md"
         try:
-            path = napkin_store.create(self.vault, f"notes/{slug}", text) or path
+            if self._napkin_usable:
+                path = napkin_store.create(self.vault, f"notes/{slug}", text) or path
         except napkin_store.NapkinError as e:
             # a duplicate slug is the expected, benign case ("already remembered").
-            # Anything else (disk full, corrupt index) would otherwise silently
-            # lose the note — surface it so the tool can report failure.
-            if "already exist" not in str(e).lower():
+            # Keep the note in plain markdown if the optional index is broken.
+            # This preserves durable local memory; search falls back to scanning
+            # these files until Napkin is repaired.
+            note_path = Path(self.vault) / path
+            try:
+                note_path.parent.mkdir(parents=True, exist_ok=True)
+                if not note_path.exists():
+                    note_path.write_text(text + "\n", encoding="utf-8")
+            except OSError:
                 log.warning("memory add failed in %s: %s", self.vault, e)
                 raise
+            log.warning("memory add using markdown fallback in %s: %s", self.vault, e)
+            self._napkin_usable = False
+        if not self._napkin_usable:
+            note_path = Path(self.vault) / path
+            note_path.parent.mkdir(parents=True, exist_ok=True)
+            if not note_path.exists():
+                note_path.write_text(text + "\n", encoding="utf-8")
         self._prompt_cache = None
         return MemoryItem(text=text, kind=kind, file=path, created=now)
 
@@ -191,9 +214,16 @@ class Memory:
             self._write_pinned(kept)
         else:
             try:
-                napkin_store.delete(self.vault, it.file or it.text)
+                if self._napkin_usable:
+                    napkin_store.delete(self.vault, it.file or it.text)
+                else:
+                    raise napkin_store.NapkinError("Napkin fallback")
             except napkin_store.NapkinError:
-                pass
+                if it.file:
+                    try:
+                        (Path(self.vault) / it.file).unlink(missing_ok=True)
+                    except OSError:
+                        pass
         self._prompt_cache = None
         return it.text
 
@@ -209,6 +239,8 @@ class Memory:
             if low.lower() in b.lower():
                 out.append(MemoryItem(text=b, kind="pinned"))
         try:
+            if not self._napkin_usable:
+                raise napkin_store.NapkinError("Napkin fallback")
             for r in napkin_store.search(self.vault, low):
                 # napkin returns Windows-style paths; normalise and surface ONLY
                 # user-authored notes. The vault ships with template scaffolding
@@ -221,7 +253,17 @@ class Memory:
                 out.append(MemoryItem(text=(snip.strip() or fpath),
                                       kind="note", file=fpath))
         except napkin_store.NapkinError:
-            pass
+            # Napkin's index is optional.  The markdown files remain the source
+            # of truth, so provide a small local substring search as fallback.
+            if self._notes_dir.is_dir():
+                for p in sorted(self._notes_dir.glob("*.md")):
+                    try:
+                        text = p.read_text(encoding="utf-8").strip()
+                    except OSError:
+                        continue
+                    if low.lower() in text.lower():
+                        out.append(MemoryItem(text=text, kind="note",
+                                              file=f"notes/{p.name}"))
         return out
 
     # -- decay (superseded) -------------------------------------------------- #
