@@ -36,3 +36,5 @@ User explicitly authorized push, separate PRs and ordered merges; supersedes loc
 - [x] #47: OpenAI transcription failure falls back to configured Groq; success stops the chain; missing credentials never trigger a request.
 
 - [x] #64: explicit one-shot selection works while Codex is active, uses real HTTP adapter under MockTransport and preserves native engine. Routed collect results resolve capture futures without losing FIFO.
+
+- [x] #65: read-only native engine switching/failover fails closed; SDK readonly options cannot bypass permissions and exclude write/shell/delegation tools. Added Linux/Windows/macOS CI matrix.

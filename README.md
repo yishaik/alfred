@@ -297,3 +297,9 @@ human user IDs if delegation is intended. This grants full bot control, not a
 read-only role. Anonymous/channel-authored updates and bot actors are rejected.
 The authorization gate runs before every update handler, including callbacks
 and reactions. Existing owner access is retained without configuration changes.
+
+Read-only orchestration roles stay on the Claude policy-enforced execution path.
+They cannot select or automatically fail over to unrestricted native engines.
+Their SDK tool allowlist excludes writes, shell execution and delegated agents;
+bridge RPC uses the same role policy. Ordinary agent engine switching remains
+available. CI covers offline tests on Linux, Windows and macOS.
