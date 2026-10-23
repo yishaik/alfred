@@ -506,6 +506,7 @@ class AgentSession:
 
     async def _stop_locked(self):
         self._stopping = True
+        await codex_engine.interrupt(self.skey)
         self.connected = False
         # unblock anything waiting on the user / on a captured turn, or the
         # question lock, the can_use_tool callback and collect() would hang
@@ -563,6 +564,9 @@ class AgentSession:
         await self._drain()
 
     async def interrupt(self):
+        if await codex_engine.interrupt(self.skey):
+            self.outbox.emit("⏹ Codex stopped")
+            return
         if self.client and self.busy:
             try:
                 await self.client.interrupt()
@@ -615,6 +619,10 @@ class AgentSession:
                 reply, usage = await _ext.run_turn(
                     self.skey, self._handoff_prompt(eng_name, text,
                         fresh=not _ext.thread_for(self.skey)), self.cfg.workdir)
+            except asyncio.CancelledError:
+                self.busy = False
+                self._fail_capture("turn cancelled")
+                raise
             except Exception as e:
                 log.warning("%s turn failed, falling back to Claude: %s",
                             eng_name, e)

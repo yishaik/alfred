@@ -179,3 +179,5 @@ Deferred deliberately on 2026-08-01 — the critical read path is covered.
 - [x] #49: missing optional Napkin integration is explicitly skipped; mocked transport success/failure and vault isolation are covered. Full pytest and selftest pass.
 
 - [x] #36: dynamic picker separates OpenRouter provider from model ID; paid opt-in and Claude fallback have regression coverage.
+
+- [x] #38: cancel/timeout/stop reap Codex process trees; intentional cancellation never replays to Claude. Real local subprocess regression tests added.
