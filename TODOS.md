@@ -172,3 +172,6 @@ Deferred deliberately on 2026-08-01 — the critical read path is covered.
       token and exits rc=75; supervisor waits 15 min — 2026-07-31
 - [x] **Gentler restart ladder** — supervisor 5/5/15/30/60/300s, so a DNS blip no
       longer costs 5 minutes offline — 2026-07-31
+
+## Audit remediation — 2026-10-23
+- [x] #48 safe test collection and offline CI. See worksheet for validation.

@@ -302,7 +302,7 @@ def test_main_registers_remote_before_generic_callback_without_starting_polling(
     from telegram.ext import CallbackQueryHandler, CommandHandler
     app = Mock()
     builder = Mock()
-    builder.token.return_value.post_init.return_value.post_shutdown.return_value.build.return_value = app
+    builder.token.return_value.defaults.return_value.post_init.return_value.post_shutdown.return_value.build.return_value = app
     with patch.object(main, "ApplicationBuilder", return_value=builder), \
          patch.object(main, "_acquire_singleton_lock", return_value=True), \
          patch.object(main, "_await_dns", return_value=True), \

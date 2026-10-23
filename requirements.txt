@@ -3,4 +3,4 @@ claude-agent-sdk>=0.2.90
 httpx>=0.27
 aiowebostv==0.9.2
 # optional: keyring (store the bot token in Windows Credential Manager)
-pywinpty>=3.0  # antigravity engine (agy.exe ConPTY driver)
+pywinpty>=3.0; sys_platform == "win32"  # antigravity engine (agy.exe ConPTY driver)
