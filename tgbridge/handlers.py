@@ -1206,7 +1206,7 @@ def _xmodel_picker_text() -> str:
     """Header for the dynamic external model picker (/models)."""
     return (
         "🌐 מודלים חיצוניים (OpenRouter — נטענים דינאמית בלייב):\n"
-        "בחירה במודל מצמידה אותו לתור הבא עם כל יומן השיחה המשותף.\n"
+        "בחירה במודל מצמידה אותו לתור הבא עם הקשר מוגבל מהיומן המשותף.\n"
         "קיצורים בצ'אט: !or <model> <שאלה>, !gpt, !deepseek, !grok, !gemini.")
 
 
@@ -1840,7 +1840,7 @@ async def on_callback(update: Update, ctx):
         await _edit(
             q,
             f"🌐 ההודעה הבאה תיענה ע\"י {short} (OpenRouter דינאמי).\n"
-            f"כל יומן השיחה המשותף יועבר אליו ברציפות.\n"
+            f"יועבר הקשר מוגבל מהיומן המשותף; היסטוריה ישנה עשויה להישמט.\n"
             f"לביטול: שלח /model.",
             panel_kb(s))
     elif data.startswith("voi:"):
