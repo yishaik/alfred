@@ -99,6 +99,10 @@ class AgentManager:
         self._watch_task: asyncio.Task | None = None
         self._crash_times: list[float] = []     # monotonic stamps of recent crashes
         self._active_alerts: set[str] = set()    # escalation keys currently tripped
+        # Durable long-task orchestration is separate from ordinary chat sessions.
+        # Imported here to keep manager_loop's AgentConfig dependency acyclic.
+        from .manager_loop import ManagerLoop
+        self.manager_loop = ManagerLoop(self)
 
     def _migrate_legacy(self):
         if "main@p" not in self.session_ids and LEGACY_SESSION_FILE.exists():
@@ -355,6 +359,7 @@ class AgentManager:
         self.save_agents()
 
     async def stop_all(self):
+        await self.manager_loop.stop()
         loops = [self._health_task, self._proactive_task, self._digest_task,
                  self._escalate_task, self._dream_task, self._watch_task]
         live = [t for t in loops if t and not t.done()]
@@ -550,6 +555,14 @@ class AgentManager:
             if committed.returncode:
                 log.error("offsite commit failed: %s", committed.stderr.strip()[:300])
                 return
+            # Rebase onto the remote first: a commit made elsewhere (a PR, a
+            # CI change) otherwise rejects every push as non-fast-forward and
+            # backups pile up locally. Dated backup files never conflict.
+            rebased = git("pull", "--rebase", timeout=300)
+            if rebased.returncode:
+                log.warning("offsite pull --rebase failed, pushing anyway: %s",
+                            rebased.stderr.strip()[:300])
+                git("rebase", "--abort")
             pushed = git("push", timeout=300)
             if pushed.returncode:
                 log.error("offsite push failed (commit is local): %s",
