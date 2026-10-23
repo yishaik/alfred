@@ -66,9 +66,13 @@ def _persist():
         log.exception("could not persist Codex thread state")
 
 
+def codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME") or str(Path.home() / ".codex")).expanduser()
+
+
 def default_model() -> str | None:
     import tomllib
-    home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    home = codex_home()
     try:
         return tomllib.loads((home / "config.toml").read_text(encoding="utf-8")).get("model")
     except (OSError, ValueError):
@@ -92,7 +96,7 @@ def list_models() -> list[tuple[str, str]]:
     """Selectable codex models from ~/.codex/models_cache.json (internal
     slugs like gpt-reserve / codex-auto-review filtered out)."""
     try:
-        data = json.loads((Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "models_cache.json").read_text(encoding="utf-8"))
+        data = json.loads((codex_home() / "models_cache.json").read_text(encoding="utf-8"))
         arr = data if isinstance(data, list) else (data.get("models") or data.get("data") or [])
         out, seen = [], set()
         for m in arr:
@@ -130,15 +134,15 @@ def available() -> tuple[bool, str]:
     reported at the moment of the decision rather than on the next message."""
     if not Path(CODEX_BIN).exists():
         return False, f"codex CLI not found at {CODEX_BIN}"
-    auth = Path.home() / ".codex/auth.json"
+    auth = codex_home() / "auth.json"
     if not auth.exists():
         return False, "not logged in — run: codex login"
     try:
         d = json.loads(auth.read_text())
     except Exception:
-        return False, "~/.codex/auth.json is unreadable"
+        return False, "Codex auth.json is unreadable"
     if not ((d.get("tokens") or {}).get("access_token") or d.get("OPENAI_API_KEY")):
-        return False, "no usable credential in ~/.codex/auth.json"
+        return False, "no usable credential in Codex auth.json"
     mode = "ChatGPT subscription" if (d.get("tokens") or {}).get("access_token") else "API key"
     return True, mode
 
