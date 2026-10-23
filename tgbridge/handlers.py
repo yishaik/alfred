@@ -1222,6 +1222,8 @@ async def cmd_model(update: Update, ctx):
 
 async def cmd_models(update: Update, ctx):
     """External one-shot model picker (paid, opt-in via OpenRouter)."""
+    from .model_catalog import refresh_openrouter_models
+    await refresh_openrouter_models()
     await update.message.reply_text(
         _xmodel_picker_text(), reply_markup=xmodels_kb())
 
@@ -1804,6 +1806,8 @@ async def on_callback(update: Update, ctx):
         await refresh(s)
         await _edit(q, _model_picker_text(s), model_kb(s))
     elif data == "menu:xmodel":
+        from .model_catalog import refresh_openrouter_models
+        await refresh_openrouter_models()
         await _edit(q, _xmodel_picker_text(), xmodels_kb(0))
     elif data.startswith("xpage:"):
         try:
@@ -1812,8 +1816,8 @@ async def on_callback(update: Update, ctx):
             p = 0
         await _edit(q, _xmodel_picker_text(), xmodels_kb(p))
     elif data == "xmodel_refresh":
-        from .model_catalog import openrouter_models
-        openrouter_models(force_refresh=True)
+        from .model_catalog import refresh_openrouter_models
+        await refresh_openrouter_models(force_refresh=True)
         await _edit(q, _xmodel_picker_text(), xmodels_kb(0))
     elif data == "menu:router":
         text, kb = await _router_card()
