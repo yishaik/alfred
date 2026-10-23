@@ -189,3 +189,5 @@ Deferred deliberately on 2026-08-01 — the critical read path is covered.
 - [x] #40: RPC calls the shared session permission gate; explicit read-only bridge tools remain usable; writes require approval or auto-approval and are always denied for read-only roles.
 
 - [x] #41: rejected scheduled turns retain jobs with bounded exponential retry, including recurring occurrences; accepted one-shots are removed.
+
+- [x] #42: early Telegram authorization gate validates chat and human actor for every update; owner default, optional explicit delegates, anonymous/bot rejection documented and tested.

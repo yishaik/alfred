@@ -17,9 +17,11 @@ from logging.handlers import RotatingFileHandler
 from telegram import Update
 from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
                           CommandHandler, Defaults, MessageHandler,
+                          TypeHandler, ApplicationHandlerStop,
                           MessageReactionHandler, filters)
 
 from . import handlers, tv_handlers
+from .config import authorized_update
 from .config import (APP_LOG_FILE, BOT_TOKEN, CHAT_ID, GROUP_ID, INBOX,
                      INVALID_DANGER_PATTERNS, LOCK_PORT, STATE_DIR, sweep_tmp,
                      system_drive_free_gb)
@@ -249,6 +251,16 @@ def _acquire_singleton_lock() -> bool:
     return True
 
 
+async def _authorize_update(update, ctx):
+    # Runs in an earlier handler group, covering commands, callbacks, edits,
+    # media, managed-bot creation and reactions, including anonymous actors.
+    if not authorized_update(update):
+        query = getattr(update, "callback_query", None)
+        if query:
+            await query.answer("not authorized", show_alert=True)
+        raise ApplicationHandlerStop
+
+
 def main():
     _disable_wmi_platform_lookup()
     rot = RotatingFileHandler(APP_LOG_FILE, maxBytes=5 * 1024 * 1024,
@@ -278,6 +290,8 @@ def main():
     app = (ApplicationBuilder().token(BOT_TOKEN)
            .defaults(Defaults(disable_notification=True))
            .post_init(post_init).post_shutdown(post_shutdown).build())
+
+    app.add_handler(TypeHandler(Update, _authorize_update), group=-1)
 
     cmds = {
         "start": handlers.cmd_start,
