@@ -156,6 +156,8 @@ def clear_thread(agent: str) -> None:
     _persist()
 
 
+_MAX_PROMPT_CHARS = 4000  # well below the ~8191-char Windows CLI limit
+
 def _argv(prompt: str, workdir: str, thread: str | None,
           model: str | None = None) -> list[str]:
     # Codex sandboxes by default and would stop to ask before writing. There is
@@ -163,10 +165,20 @@ def _argv(prompt: str, workdir: str, thread: str | None,
     # the bridge is already an authorised agent running as the owner.
     flags = ["--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"]
     mflag = ["-m", model] if model else []
+
+    # Windows CLI limit is ~8191 chars; long prompts (journal context included)
+    # cause "The command line is too long." Write to a temp file and pass the
+    # path instead when the prompt exceeds the safe threshold.
+    if len(prompt) > _MAX_PROMPT_CHARS:
+        tmp = Path(workdir) / ".codex_prompt.txt"
+        tmp.write_text(prompt, encoding="utf-8")
+        prompt_arg = f"@{tmp.name}"
+    else:
+        prompt_arg = prompt
+
     if thread:
-        # resume restores cwd and context, but accepts a new model explicitly.
-        return [CODEX_BIN, "exec", "resume", *flags, *mflag, thread, prompt]
-    return [CODEX_BIN, "exec", *flags, *mflag, "--cd", workdir, prompt]
+        return [CODEX_BIN, "exec", "resume", *flags, *mflag, thread, prompt_arg]
+    return [CODEX_BIN, "exec", *flags, *mflag, "--cd", workdir, prompt_arg]
 
 
 def _extract(stdout: str) -> tuple[str, str | None, dict, list[str]]:
