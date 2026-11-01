@@ -49,6 +49,12 @@ class Outbox:
         self.bot = bot
         self.chat_id = chat_id
         self.thread_id = thread_id
+        # The destination used for the item currently being SENT. Each queued
+        # item carries the thread_id it was created for (stamped at enqueue), so
+        # a reply queued for one topic still lands there even if self.thread_id
+        # is later retargeted to another topic by _attach_thread. The sender is
+        # a single sequential task, so one transient field is race-free.
+        self._active_tid = thread_id
         self.prefix_fn = prefix_fn or (lambda: "")
         self.queue: asyncio.Queue = asyncio.Queue()
         self._task: asyncio.Task | None = None
@@ -102,36 +108,38 @@ class Outbox:
         self._task = None
 
     # -- producers (sync, callable from anywhere) --------------------------- #
+    # Each item's LAST element is the destination thread_id captured now, so a
+    # later retarget of self.thread_id cannot divert an already-queued reply.
     def emit(self, text: str):
         if text and not self.muted:
-            self.queue.put_nowait(("text", text))
+            self.queue.put_nowait(("text", text, self.thread_id))
 
     def file(self, path: str):
         if not self.muted:
-            self.queue.put_nowait(("file", path))
+            self.queue.put_nowait(("file", path, self.thread_id))
 
     def voice(self, path: str, as_voice: bool = True):
         """Send synthesized speech (temp file is deleted after sending)."""
         if self.muted:
             return
-        self.queue.put_nowait(("vc", path, as_voice))
+        self.queue.put_nowait(("vc", path, as_voice, self.thread_id))
 
     def keyboard(self, text: str, markup: InlineKeyboardMarkup, on_sent=None):
         """Send text with an inline keyboard; on_sent(message) is awaited after."""
         if not self.muted:
-            self.queue.put_nowait(("kb", text, markup, on_sent))
+            self.queue.put_nowait(("kb", text, markup, on_sent, self.thread_id))
 
     def stream_delta(self, text: str):
         if self.muted:
             return
         self.stream_seen = True
-        self.queue.put_nowait(("sd", text))
+        self.queue.put_nowait(("sd", text, self.thread_id))
 
     def stream_close(self, final_clean_md: str | None, markup=None):
         """Finalize the current draft. final_clean_md replaces the draft tail
         (markers stripped); None keeps whatever streamed."""
         if not self.muted:
-            self.queue.put_nowait(("sc", final_clean_md, markup))
+            self.queue.put_nowait(("sc", final_clean_md, markup, self.thread_id))
 
     # -- sender loop --------------------------------------------------------- #
     async def _run(self):
@@ -140,28 +148,45 @@ class Outbox:
         anywhere. Every iteration is therefore wrapped, and a poisonous item is
         dropped (after logging) rather than allowed to kill delivery."""
         pending: list[str] = []
+        batch_tid = self.thread_id      # destination the pending batch is for
         consecutive_failures = 0
+
+        async def flush_batch():
+            # Send the accumulated text batch to the destination it was queued
+            # for, not whatever self.thread_id now points at.
+            self._active_tid = batch_tid
+            await self._flush(pending)
+
         while True:
             try:
                 try:
                     item = await asyncio.wait_for(
                         self.queue.get(), timeout=BATCH_WINDOW if pending else None)
                 except asyncio.TimeoutError:
-                    await self._flush(pending)
+                    await flush_batch()
                     continue
                 kind = item[0]
+                tid = item[-1]          # destination stamped at enqueue
                 if kind == "text":
+                    # A text item for a different topic must not join this batch.
+                    if pending and tid != batch_tid:
+                        await flush_batch()
+                    if not pending:
+                        batch_tid = tid
                     pending.append(item[1])
                     if sum(len(x) for x in pending) > 3000:
-                        await self._flush(pending)
+                        await flush_batch()
                 elif kind == "sd":
-                    await self._flush(pending)
+                    await flush_batch()
+                    self._active_tid = tid
                     await self._on_delta(item[1])
                 elif kind == "sc":
-                    await self._flush(pending)
+                    await flush_batch()
+                    self._active_tid = tid
                     await self._on_close(item[1], item[2])
                 else:
-                    await self._flush(pending)
+                    await flush_batch()
+                    self._active_tid = tid
                     if kind == "file":
                         await self._send_file(item[1])
                     elif kind == "vc":
@@ -242,7 +267,7 @@ class Outbox:
         first = pages[0] + nav
         if n > 1:
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-            tid = self.thread_id or 0
+            tid = self._active_tid or 0
             kb = InlineKeyboardMarkup([[
                 InlineKeyboardButton(
                     f"▶ More  2/{n}",
@@ -346,13 +371,13 @@ class Outbox:
                             self.chat_id, html_text or md_to_html(raw),
                             parse_mode="HTML", reply_markup=reply_markup,
                             disable_web_page_preview=disable_preview,
-                            message_thread_id=self.thread_id)
+                            message_thread_id=self._active_tid)
                     except BadRequest:
                         pass  # fall through to plain
                 return await self.bot.send_message(
                     self.chat_id, raw, reply_markup=reply_markup,
                     disable_web_page_preview=disable_preview,
-                    message_thread_id=self.thread_id)
+                    message_thread_id=self._active_tid)
             except RetryAfter as e:
                 last_err = e
                 await asyncio.sleep(e.retry_after + 0.5)
@@ -379,7 +404,7 @@ class Outbox:
                 await self.bot.send_document(
                     self.chat_id, fh, filename=name,
                     caption=text[:200].replace("\n", " "),
-                    message_thread_id=self.thread_id)
+                    message_thread_id=self._active_tid)
             os.unlink(tmp)
         except Exception as e:
             log.error("send-as-file failed: %s", e)
@@ -392,10 +417,10 @@ class Outbox:
             with open(path, "rb") as fh:
                 if as_voice:
                     await self.bot.send_voice(self.chat_id, fh,
-                                              message_thread_id=self.thread_id)
+                                              message_thread_id=self._active_tid)
                 else:
                     await self.bot.send_audio(self.chat_id, fh, title="reply",
-                                              message_thread_id=self.thread_id)
+                                              message_thread_id=self._active_tid)
         except Exception as e:
             log.warning("voice send failed: %s", e)
         finally:
@@ -418,11 +443,11 @@ class Outbox:
                     if ext in IMG_EXTS:
                         await self.bot.send_photo(
                             self.chat_id, fh, caption=name,
-                            message_thread_id=self.thread_id)
+                            message_thread_id=self._active_tid)
                     else:
                         await self.bot.send_document(
                             self.chat_id, fh, filename=name,
-                            message_thread_id=self.thread_id)
+                            message_thread_id=self._active_tid)
                 return
             except RetryAfter as e:
                 await asyncio.sleep(e.retry_after + 0.5)

@@ -15,7 +15,13 @@ def test_real_codex_child_is_reaped_on_interrupt(tmp_path, monkeypatch):
                 break
             await asyncio.sleep(.01)
         assert await codex_engine.interrupt("cancel-fixture")
-        assert task.cancelled()
+        # The turn now ends with a clean CodexInterrupted, NOT task cancellation:
+        # interrupt cancels the child subprocess-wait, never the caller task, so
+        # a scheduler/caller awaiting this inline is not taken down with it. The
+        # real child is still reaped (_kill_tree runs before the raise).
+        with pytest.raises(codex_engine.CodexInterrupted):
+            await task
+        assert not task.cancelled()
         assert "cancel-fixture" not in codex_engine._running
         assert not await codex_engine.interrupt("cancel-fixture")
     asyncio.run(scenario())

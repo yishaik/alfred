@@ -691,6 +691,19 @@ class AgentSession:
                 self.busy = False
                 self._fail_capture("turn cancelled")
                 raise
+            except codex_engine.CodexInterrupted:
+                # Deliberate stop (interrupt), not a failure: do NOT fail over
+                # to Claude and do NOT replay. Clear state and drain any queued
+                # user messages so a redirect after /interrupt still runs — but
+                # NOT while stopping/restarting: _stop_locked interrupts before
+                # it cancels the input tasks, and draining then would popleft a
+                # queued human message (plain stop() keeps no snapshot, so it
+                # would be lost) and spawn a subprocess about to be killed.
+                self.busy = False
+                self._fail_capture("interrupted")
+                if not self._stopping and self._capture is None:
+                    await self._drain()
+                return True
             except Exception as e:
                 log.warning("%s turn failed, falling back to Claude: %s",
                             eng_name, e)
@@ -979,7 +992,13 @@ class AgentSession:
             self._ensure_reconnect()
 
     async def _drain(self):
-        if self.pending and not self.busy:
+        # Feed queued items while the agent is free. A scheduled/peer turn that
+        # feed() finally REJECTS (e.g. the auto-turn rate limit) returns without
+        # starting a turn, so busy stays False — popping only one item used to
+        # strand a human message queued behind it until the next event. Keep
+        # draining until a turn actually starts (busy True) or the queue empties.
+        # popleft() shrinks pending every iteration, so this cannot spin.
+        while self.pending and not self.busy:
             text, source = self.pending.popleft()
             await self.feed(text, source)
 

@@ -41,6 +41,7 @@ import logging
 import os
 import shutil
 import signal
+import uuid
 from pathlib import Path
 
 from .config import STATE_DIR, load_json, save_json, scrubbed_child_env
@@ -158,24 +159,29 @@ def clear_thread(agent: str) -> None:
 
 _MAX_PROMPT_CHARS = 4000  # well below the ~8191-char Windows CLI limit
 
-def _argv(prompt: str, workdir: str, thread: str | None,
+def _write_prompt_file(prompt: str, workdir: str) -> Path | None:
+    """Long prompts go in a file ( Windows ~8191-char CLI limit). Give each turn
+    its OWN file — a fixed name was shared by every conversation in one workdir,
+    so a second turn could overwrite the prompt a live Codex process still had
+    to read. Private perms; the caller unlinks it after the subprocess exits."""
+    if len(prompt) <= _MAX_PROMPT_CHARS:
+        return None
+    tmp = Path(workdir) / f".codex_prompt.{uuid.uuid4().hex}.txt"
+    tmp.write_text(prompt, encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    return tmp
+
+
+def _argv(prompt_arg: str, workdir: str, thread: str | None,
           model: str | None = None) -> list[str]:
     # Codex sandboxes by default and would stop to ask before writing. There is
     # no interactive terminal here, so an approval prompt just hangs the turn;
     # the bridge is already an authorised agent running as the owner.
     flags = ["--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"]
     mflag = ["-m", model] if model else []
-
-    # Windows CLI limit is ~8191 chars; long prompts (journal context included)
-    # cause "The command line is too long." Write to a temp file and pass the
-    # path instead when the prompt exceeds the safe threshold.
-    if len(prompt) > _MAX_PROMPT_CHARS:
-        tmp = Path(workdir) / ".codex_prompt.txt"
-        tmp.write_text(prompt, encoding="utf-8")
-        prompt_arg = f"@{tmp.name}"
-    else:
-        prompt_arg = prompt
-
     if thread:
         return [CODEX_BIN, "exec", "resume", *flags, *mflag, thread, prompt_arg]
     return [CODEX_BIN, "exec", *flags, *mflag, "--cd", workdir, prompt_arg]
@@ -214,7 +220,33 @@ def _extract(stdout: str) -> tuple[str, str | None, dict, list[str]]:
     return "\n\n".join(parts).strip(), thread, usage, errors
 
 
+# The subprocess-wait task for each route — a CHILD of whoever called run_turn,
+# never the caller's own task. interrupt() cancels this, so cancelling a Codex
+# turn can never cancel the scheduler loop (or any other caller) that happens to
+# be awaiting it inline.
 _running: dict[str, asyncio.Task] = {}
+
+
+class CodexInterrupted(Exception):
+    """A Codex turn was stopped on purpose (interrupt), not a provider failure.
+    feed() treats this as a clean stop: no Claude failover, no turn replay."""
+
+
+def _caller_cancelled() -> bool:
+    """True when THIS (the caller's) task is itself being cancelled, as opposed
+    to only the child subprocess-wait task being cancelled by interrupt().
+
+    Relies on Task.cancelling() (3.11+), a counter cleared only by uncancel().
+    It is accurate for our live callers because none of them swallow a
+    CancelledError and keep running on the same task. If a future caller ever
+    catches CancelledError without uncancel()-ing, its counter would stay
+    elevated and every later interrupt would misclassify as a caller-cancel —
+    keep that invariant in mind when adding callers."""
+    t = asyncio.current_task()
+    try:
+        return t is not None and t.cancelling() > 0
+    except AttributeError:        # pre-3.11; this box is 3.12+, kept defensive
+        return False
 
 
 async def interrupt(agent: str) -> bool:
@@ -224,7 +256,7 @@ async def interrupt(agent: str) -> bool:
     task.cancel()
     try:
         await task
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, Exception):
         pass
     return True
 
@@ -255,7 +287,9 @@ async def run_turn(agent: str, prompt: str, workdir: str,
     if agent in _running:
         raise RuntimeError("Codex turn already running for this route")
     thread = thread_for(agent)
-    argv = _argv(prompt, workdir, thread, _models.get(agent) or default_model())
+    prompt_file = _write_prompt_file(prompt, workdir)
+    prompt_arg = f"@{prompt_file.name}" if prompt_file else prompt
+    argv = _argv(prompt_arg, workdir, thread, _models.get(agent) or default_model())
     proc = await asyncio.create_subprocess_exec(
         *argv,
         stdout=asyncio.subprocess.PIPE,
@@ -270,16 +304,37 @@ async def run_turn(agent: str, prompt: str, workdir: str,
              "BRIDGE_ROUTE": agent, "BRIDGE_STATE_DIR": str(STATE_DIR),
              "PATH": os.environ.get("PATH", "") + os.pathsep + str(Path.home() / ".local/bin")},
     )
-    _running[agent] = asyncio.current_task()
+    # Wait on the subprocess in a dedicated child task and register THAT, so an
+    # interrupt cancels the child — not the caller task (which may be the
+    # scheduler loop awaiting feed() inline; cancelling it used to kill the
+    # whole scheduler).
+    comm = asyncio.ensure_future(proc.communicate())
+    _running[agent] = comm
     try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+        out, err = await asyncio.wait_for(asyncio.shield(comm), timeout=timeout)
+    except asyncio.TimeoutError as exc:
+        comm.cancel()
+        # Retrieve the child's result/exception so a lost cancel race doesn't
+        # leave a stray "Task exception was never retrieved" warning.
+        await asyncio.gather(comm, return_exceptions=True)
         await _kill_tree(proc)
-        if isinstance(exc, asyncio.CancelledError):
-            raise
         raise RuntimeError(f"codex timed out after {int(timeout)}s") from exc
+    except asyncio.CancelledError:
+        await _kill_tree(proc)
+        if _caller_cancelled():
+            # Real shutdown of the caller — tear the child down and propagate.
+            comm.cancel()
+            raise
+        # Only the child was cancelled, i.e. interrupt(): report a clean stop so
+        # the caller survives and no failover/replay is triggered.
+        raise CodexInterrupted("codex turn interrupted") from None
     finally:
         _running.pop(agent, None)
+        if prompt_file is not None:
+            try:
+                prompt_file.unlink()
+            except OSError:
+                pass
 
     text, new_thread, usage, errors = _extract(out.decode("utf-8", "replace"))
     if new_thread:
