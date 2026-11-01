@@ -1,3 +1,12 @@
+## Security/reliability PR — 2026-11-01
+
+- [x] Port the scoped child-environment/secret-file guard and Codex interruption,
+  queue-drain, outbound-topic and prompt-file changes onto GitHub master.
+- [x] Verify actual SDK guard/env integration and run isolated offline suites.
+- [ ] Owner/orchestrator activation and live Telegram/provider validation.
+- [ ] Separate follow-up: native-engine approval parity, reveal authentication,
+  unknown-outcome reconciliation and durable delivery/job lifecycle.
+
 # Alfred — Task Queue
 
 ## Model continuity — 2026-10-22

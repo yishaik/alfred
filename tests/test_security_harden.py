@@ -107,3 +107,35 @@ def test_send_file_blocks_secret_path(tool, path):
 @pytest.mark.parametrize("tool", ["send_file", "mcp__bridge__send_file"])
 def test_send_file_allows_ordinary_path(tool):
     assert is_forbidden(tool, {"path": "/home/ubuntu/report.pdf"}) is None
+
+
+def test_sdk_hook_enforces_secret_denial_under_auto_approve(monkeypatch):
+    """Exercise the installed hook, rather than only the filename predicate."""
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    from tgbridge import guards
+
+    monkeypatch.setattr(guards, "audit", Mock())
+    monkeypatch.setattr(guards.tracing, "start", Mock())
+    session = SimpleNamespace(cfg=SimpleNamespace(name="synthetic", auto_approve=True),
+                              skey="synthetic@p", outbox=SimpleNamespace(emit=Mock()),
+                              guard_approve=AsyncMock())
+    hook = guards.build_hooks(session)["PreToolUse"][0].hooks[0]
+    result = asyncio.run(hook({"tool_name": "Bash", "tool_input": {
+        "command": "cat /synthetic/.env # secretbox.py"}}, "synthetic-id", None))
+    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+    session.guard_approve.assert_not_awaited()
+
+
+def test_claude_options_apply_child_environment_scrub(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from tgbridge.session import AgentConfig, AgentSession
+
+    monkeypatch.setenv("SYNTHETIC_SERVICE_TOKEN", "synthetic-only")
+    cfg = AgentConfig(name="synthetic", workdir=str(tmp_path))
+    mgr = SimpleNamespace(bot=object(), session_ids={}, active=cfg.name,
+                          agents={cfg.name: cfg},
+                          memory_for=lambda name: SimpleNamespace(render_prompt=lambda: ""))
+    session = AgentSession(mgr, cfg, "synthetic-options@p", 1, 1, None)
+    assert session._options().env["SYNTHETIC_SERVICE_TOKEN"] == ""
