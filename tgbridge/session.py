@@ -42,7 +42,8 @@ from . import metrics
 from .config import (BOT_TURNS_PER_HOUR, CHAT_ID, CLAUDE_BIN,
                      CLAUDE_INIT_TIMEOUT_MS, CLAUDE_MAX_BUFFER_SIZE,
                      CONTEXT_WARN_PCT, MODEL, PERMISSION_TIMEOUT,
-                     QUESTION_TIMEOUT, TMP_DIR, TURN_WARN_SECONDS, WORKDIR)
+                     QUESTION_TIMEOUT, TMP_DIR, TURN_WARN_SECONDS, WORKDIR,
+                     scrubbed_child_env)
 from .fmt import (SEP, fmt_duration, format_error, format_output,
                   format_tool_lines, summarize_tool, tool_icon)
 from .mood import Mood
@@ -199,6 +200,12 @@ class TurnSource:
     hop: int = 0
     origin: str = ""            # who sent it (bot/peer name)
 
+
+def _scrubbed_secrets() -> dict[str, str]:
+    """Child-env secret overrides. Now one shared contract in config so every
+    engine (Claude here, Codex, Antigravity) hides the same keys; see
+    config.scrubbed_child_env for the rationale."""
+    return scrubbed_child_env()
 
 class AgentSession:
     def __init__(self, mgr, cfg: AgentConfig, skey: str, sid: int,
@@ -377,7 +384,8 @@ class AgentSession:
             # from our own os.environ for the handshake timeout — config.py sets
             # it there too, which is what actually extends the 60s init window.
             env={"TEMP": str(TMP_DIR), "TMP": str(TMP_DIR),
-                 "CLAUDE_CODE_STREAM_CLOSE_TIMEOUT": CLAUDE_INIT_TIMEOUT_MS},
+                 "CLAUDE_CODE_STREAM_CLOSE_TIMEOUT": CLAUDE_INIT_TIMEOUT_MS,
+                 **_scrubbed_secrets()},
         )
 
     def _ensure_workdir(self):
@@ -683,6 +691,19 @@ class AgentSession:
                 self.busy = False
                 self._fail_capture("turn cancelled")
                 raise
+            except codex_engine.CodexInterrupted:
+                # Deliberate stop (interrupt), not a failure: do NOT fail over
+                # to Claude and do NOT replay. Clear state and drain any queued
+                # user messages so a redirect after /interrupt still runs — but
+                # NOT while stopping/restarting: _stop_locked interrupts before
+                # it cancels the input tasks, and draining then would popleft a
+                # queued human message (plain stop() keeps no snapshot, so it
+                # would be lost) and spawn a subprocess about to be killed.
+                self.busy = False
+                self._fail_capture("interrupted")
+                if not self._stopping and self._capture is None:
+                    await self._drain()
+                return True
             except Exception as e:
                 log.warning("%s turn failed, falling back to Claude: %s",
                             eng_name, e)
@@ -971,7 +992,13 @@ class AgentSession:
             self._ensure_reconnect()
 
     async def _drain(self):
-        if self.pending and not self.busy:
+        # Feed queued items while the agent is free. A scheduled/peer turn that
+        # feed() finally REJECTS (e.g. the auto-turn rate limit) returns without
+        # starting a turn, so busy stays False — popping only one item used to
+        # strand a human message queued behind it until the next event. Keep
+        # draining until a turn actually starts (busy True) or the queue empties.
+        # popleft() shrinks pending every iteration, so this cannot spin.
+        while self.pending and not self.busy:
             text, source = self.pending.popleft()
             await self.feed(text, source)
 

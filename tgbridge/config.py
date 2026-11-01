@@ -15,6 +15,7 @@ Claude, i.e. it is as sensitive as a shell on this machine).
 
 import json
 import os
+import re
 import threading
 from pathlib import Path
 
@@ -86,6 +87,13 @@ def system_drive_free_gb() -> float | None:
         return None
 
 
+# Every key name we loaded from .env — the known secret source. Names only; no
+# values are kept here. scrubbed_child_env() blanks all of these in any child
+# process so a leaked key name (one the secret-name regex misses, e.g.
+# BRIDGE_PEER_LEGACY) can never ride os.environ into claude/codex.
+DOTENV_KEYS: set[str] = set()
+
+
 def _load_env(path: Path) -> None:
     """Minimal .env loader (KEY=VALUE lines, # comments).
 
@@ -101,12 +109,55 @@ def _load_env(path: Path) -> None:
                 continue
             k, _, v = ln.partition("=")
             k, v = k.strip(), v.strip()
+            DOTENV_KEYS.add(k)
             if v:
                 os.environ[k] = v          # .env wins over a stale OS-env value
             else:
                 os.environ.setdefault(k, v)
     except FileNotFoundError:
         pass
+
+
+# Names that look secret regardless of where they came from.
+_SECRET_ENV_RX = re.compile(r"(TOKEN|_KEY|SECRET|PASSWORD|PASSWD)", re.IGNORECASE)
+# Model-provider auth the child legitimately needs; never blanked.
+_CHILD_ENV_KEEP = ("ANTHROPIC_", "CLAUDE_")
+# Non-secret bridge operational config that legitimately came from .env. These
+# are kept live in the child so the .env-union scrub below doesn't empty plain
+# settings (paths, names, ports). Anything NOT listed here is blanked by
+# default — a new secret added to .env is hidden without touching this file.
+# Secret-shaped names (…TOKEN/_KEY/…) are blanked regardless of this list.
+_CHILD_ENV_NONSECRET = frozenset((
+    "BRIDGE_BACKUP_REPO", "BRIDGE_CHAT_ID", "BRIDGE_GROUP_ID", "BRIDGE_CLAUDE_BIN",
+    "BRIDGE_CODEX_BIN", "BRIDGE_AGY_ROOT", "BRIDGE_AGY_EXE", "BRIDGE_XREADER_DIR",
+    "BRIDGE_INSTANCE_NAME", "BRIDGE_PEERS", "BRIDGE_PEER_BIND", "BRIDGE_PEER_NAME",
+    "BRIDGE_PEER_PORT", "BRIDGE_WORKDIR", "BRIDGE_MODEL", "BRIDGE_ENV_FILE",
+    "BRIDGE_STATE_DIR", "BRIDGE_TTS_VOICE", "BRIDGE_TTS_EDGE_VOICE",
+    "BRIDGE_MAX_BUFFER_SIZE"))
+
+
+def scrubbed_child_env() -> dict[str, str]:
+    """Overrides ({key: ""}) that hide every bridge secret from a child process.
+
+    One contract for all engines (Claude SDK subprocess, Codex, Antigravity).
+    A child inherits os.environ, so anything an injected turn is talked into —
+    `echo $OPENAI_API_KEY`, or shipping it out — would otherwise reach a live
+    credential. We blank a key when it matches the secret-name regex, or came
+    from .env (the kitchen-sink secret file) and is not a known non-secret
+    setting — so a non-matching secret name like BRIDGE_PEER_LEGACY is covered
+    while plain config (paths/ports) is preserved. ANTHROPIC_/CLAUDE_ auth is
+    kept; a session that needs a real secret runs it through secretbox --run.
+    Merging these empty strings over os.environ is the only way to unset a key
+    for the child (you cannot delete from an inherited environment)."""
+    out: dict[str, str] = {}
+    for k in os.environ:
+        if k.startswith(_CHILD_ENV_KEEP):
+            continue
+        if _SECRET_ENV_RX.search(k):
+            out[k] = ""
+        elif k in DOTENV_KEYS and k not in _CHILD_ENV_NONSECRET:
+            out[k] = ""
+    return out
 
 
 # BRIDGE_ENV_FILE points a second bridge process at its own config. Without it
