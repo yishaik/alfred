@@ -43,7 +43,7 @@ import shutil
 import signal
 from pathlib import Path
 
-from .config import STATE_DIR, load_json, save_json
+from .config import STATE_DIR, load_json, save_json, scrubbed_child_env
 
 log = logging.getLogger("bridge.codex")
 
@@ -262,7 +262,11 @@ async def run_turn(agent: str, prompt: str, workdir: str,
         stderr=asyncio.subprocess.PIPE,
         cwd=workdir,
         start_new_session=os.name != "nt",
-        env={**os.environ, "BRIDGE_AGENT": agent.split("@", 1)[0],
+        # Scrub the bridge's secrets from Codex's env, same contract Claude
+        # uses. Codex authenticates from ~/.codex/auth.json (file, not env), so
+        # blanking secret-shaped vars does not break failover.
+        env={**os.environ, **scrubbed_child_env(),
+             "BRIDGE_AGENT": agent.split("@", 1)[0],
              "BRIDGE_ROUTE": agent, "BRIDGE_STATE_DIR": str(STATE_DIR),
              "PATH": os.environ.get("PATH", "") + os.pathsep + str(Path.home() / ".local/bin")},
     )

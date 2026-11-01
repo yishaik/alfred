@@ -42,7 +42,8 @@ from . import metrics
 from .config import (BOT_TURNS_PER_HOUR, CHAT_ID, CLAUDE_BIN,
                      CLAUDE_INIT_TIMEOUT_MS, CLAUDE_MAX_BUFFER_SIZE,
                      CONTEXT_WARN_PCT, MODEL, PERMISSION_TIMEOUT,
-                     QUESTION_TIMEOUT, TMP_DIR, TURN_WARN_SECONDS, WORKDIR)
+                     QUESTION_TIMEOUT, TMP_DIR, TURN_WARN_SECONDS, WORKDIR,
+                     scrubbed_child_env)
 from .fmt import (SEP, fmt_duration, format_error, format_output,
                   format_tool_lines, summarize_tool, tool_icon)
 from .mood import Mood
@@ -199,6 +200,12 @@ class TurnSource:
     hop: int = 0
     origin: str = ""            # who sent it (bot/peer name)
 
+
+def _scrubbed_secrets() -> dict[str, str]:
+    """Child-env secret overrides. Now one shared contract in config so every
+    engine (Claude here, Codex, Antigravity) hides the same keys; see
+    config.scrubbed_child_env for the rationale."""
+    return scrubbed_child_env()
 
 class AgentSession:
     def __init__(self, mgr, cfg: AgentConfig, skey: str, sid: int,
@@ -377,7 +384,8 @@ class AgentSession:
             # from our own os.environ for the handshake timeout — config.py sets
             # it there too, which is what actually extends the 60s init window.
             env={"TEMP": str(TMP_DIR), "TMP": str(TMP_DIR),
-                 "CLAUDE_CODE_STREAM_CLOSE_TIMEOUT": CLAUDE_INIT_TIMEOUT_MS},
+                 "CLAUDE_CODE_STREAM_CLOSE_TIMEOUT": CLAUDE_INIT_TIMEOUT_MS,
+                 **_scrubbed_secrets()},
         )
 
     def _ensure_workdir(self):
