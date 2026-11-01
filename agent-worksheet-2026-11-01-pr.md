@@ -20,3 +20,10 @@ ownership for output produced after retargeting. Native-engine approval parity,
 stronger secret broker/reveal authentication, uncertain-effect reconciliation,
 and durable job/delivery acknowledgement are separate follow-ups. Source tests
 are not evidence of deployment or live Telegram behavior. No service restart.
+
+## CI portability follow-up
+
+Windows CI exposed a POSIX-only mode assertion. Keep uniqueness/content/cleanup
+checks on all platforms and assert mode 0600 only on POSIX. Windows file access
+is governed by ACLs; this PR does not validate Windows ACL privacy. The complete
+isolated pytest suite passes: 165 tests.

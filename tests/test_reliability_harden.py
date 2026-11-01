@@ -4,6 +4,7 @@ Models the reviewer's route_cancel repro but asserts the FIXED behavior.
 Synthetic only — no real subprocess is started.
 """
 import asyncio
+import os
 import tempfile
 import time
 from collections import deque
@@ -127,7 +128,9 @@ def test_write_prompt_file_is_unique_and_private(tmp_path):
     assert a is not None and b is not None and a != b
     assert a.exists() and b.exists()
     assert a.read_text() == long
-    assert (a.stat().st_mode & 0o777) == 0o600
+    # Windows uses ACLs; chmod does not implement POSIX permission bits there.
+    if os.name == "posix":
+        assert (a.stat().st_mode & 0o777) == 0o600
     a.unlink()
     b.unlink()
     assert codex_engine._write_prompt_file("short", str(tmp_path)) is None
