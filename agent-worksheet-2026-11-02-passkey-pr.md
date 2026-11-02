@@ -39,3 +39,9 @@ scratch worktree. This PR gates raw reveal, not every page/editor request.
 Same-UID code/storage tampering and a privileged broker remain open. Native
 approval parity, child environment, durable delivery/reconciliation are outside
 scope. No service restart, live notification or deployment in this PR task.
+
+## CI follow-up
+
+Windows CI exposed locale-dependent decoding in the controller test fixture.
+Read Python source explicitly as UTF-8 rather than Windows cp1252. This changes
+only test loading; runtime source and the live checkout remain untouched.

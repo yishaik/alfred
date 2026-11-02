@@ -200,7 +200,7 @@ def test_credential_store_private_and_atomic(tmp_path):
 @pytest.fixture
 def server(tmp_path):
     src = ROOT / "secretbox.py"
-    tree = ast.parse(src.read_text())
+    tree = ast.parse(src.read_text(encoding="utf-8"))
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Handler")
     resolve_reveal = Mock(return_value=("synthetic-secret-value", "vault", None))
     audit = Mock()
