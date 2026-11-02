@@ -1,3 +1,10 @@
+## Secretbox passkey PR — 2026-11-02
+
+- [x] Port committed passkey reveal and required Secretbox prerequisites to an
+  isolated branch; verify offline suites and declare cryptography dependency.
+- [ ] Owner phone enrollment/reveal check after entering the Telegram code.
+- [ ] Privileged broker/OS isolation and review of custom WebAuthn verifier.
+
 ## Security/reliability PR — 2026-11-01
 
 - [x] Port the scoped child-environment/secret-file guard and Codex interruption,
