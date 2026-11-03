@@ -1,0 +1,10 @@
+[Unit]
+Description=Agents Hub tick for Alfred (inbox log + heartbeat; never acts on messages)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/alfred
+ExecStart=/usr/bin/python3 /home/ubuntu/alfred/secretbox.py --run agents-hub/AGENTS_HUB_TOKEN -- /usr/bin/python3 /home/ubuntu/alfred/agentshub/hub.py tick
+TimeoutStartSec=120
